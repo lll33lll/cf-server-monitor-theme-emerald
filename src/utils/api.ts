@@ -1211,20 +1211,33 @@ function rowToStatusRecord(uuid: string, row: HistoryRow): StatusRecord {
   }
 }
 
-const historyRequests = new Map<string, { at: number, promise: Promise<HistoryRow[]> }>()
+const historyRequests = new Map<string, { at: number, pending: boolean, promise: Promise<HistoryRow[]> }>()
 
 async function fetchHistoryRows(uuid: string, hours: number): Promise<HistoryRow[]> {
   const source = getServerSource(uuid)
   const viewer = authHeaders(source.baseUrl).get('Authorization') ?? ''
   const key = `${source.baseUrl}|${source.serverId}|${hours}|${viewer}`
   const cached = historyRequests.get(key)
-  if (cached && Date.now() - cached.at < 15_000)
+  const age = cached ? Date.now() - cached.at : 0
+  if (cached && (cached.pending || (age >= 0 && age < 15_000)))
     return cached.promise
-  const promise = request<HistoryRow[]>(`/api/history/all?id=${encodeURIComponent(source.serverId)}&hours=${hours}`, source.apiIndex)
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 30_000)
+  const promise = request<HistoryRow[]>(`/api/history/all?id=${encodeURIComponent(source.serverId)}&hours=${hours}`, source.apiIndex, { signal: controller.signal })
     .then((rows) => {
       if (!Array.isArray(rows))
         throw new ApiError('历史接口返回格式异常', 502, source.apiIndex)
-      const valid = rows.filter(row => timestamp(row.timestamp, 0) > 0)
+      const entry = historyRequests.get(key)
+      if (entry?.promise === promise) {
+        entry.pending = false
+        entry.at = Date.now()
+      }
+      const valid = rows.filter((row) => {
+        if (!row || typeof row !== 'object' || Array.isArray(row))
+          return false
+        const time = timestamp(row.timestamp, 0)
+        return time > 0 && time <= Date.now() + 120_000
+      })
       const samples = valid.map(row => ({
         time: new Date(timestamp(row.timestamp, 0)).toISOString(),
         latency: null,
@@ -1235,12 +1248,14 @@ async function fetchHistoryRows(uuid: string, hours: number): Promise<HistoryRow
       return valid
     })
     .catch((error) => {
-      historyRequests.delete(key)
+      if (historyRequests.get(key)?.promise === promise)
+        historyRequests.delete(key)
       throw error
     })
+    .finally(() => clearTimeout(timeout))
   if (historyRequests.size >= 16)
     historyRequests.delete(historyRequests.keys().next().value!)
-  historyRequests.set(key, { at: Date.now(), promise })
+  historyRequests.set(key, { at: Date.now(), pending: true, promise })
   return promise
 }
 

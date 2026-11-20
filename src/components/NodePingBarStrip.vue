@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue'
 import { formatDateTime } from '@/utils/helper'
+import { placeProbeTooltip } from '@/utils/probeTooltip'
 import { formatPingValue } from '@/utils/threeNetPing'
 
 interface DisplayBar {
@@ -27,10 +28,11 @@ const root = ref<HTMLElement | null>(null)
 const bubble = ref<HTMLElement | null>(null)
 const activeIndex = ref<number | null>(null)
 const bubbleId = useId()
-const position = ref({ left: 0, top: 0, arrow: 0, below: false })
+const position = ref({ left: 0, top: 0, arrow: 0, below: false, maxWidth: 360 })
 let pointerId: number | null = null
 let holdTimer: ReturnType<typeof setTimeout> | null = null
 let disposed = false
+let placementFrame: number | null = null
 
 const activeBar = computed(() => activeIndex.value === null ? null : props.bars[activeIndex.value] ?? null)
 const text = computed(() => {
@@ -55,10 +57,34 @@ function clearTimer() {
   holdTimer = null
 }
 
+function releasePointer() {
+  const id = pointerId
+  pointerId = null
+  if (id === null)
+    return
+  try {
+    if (root.value?.hasPointerCapture(id))
+      root.value.releasePointerCapture(id)
+  }
+  catch {}
+}
+
 function close() {
   clearTimer()
-  pointerId = null
+  if (placementFrame !== null)
+    cancelAnimationFrame(placementFrame)
+  placementFrame = null
+  releasePointer()
   activeIndex.value = null
+}
+
+function scheduleBubble() {
+  if (disposed || placementFrame !== null)
+    return
+  placementFrame = requestAnimationFrame(() => {
+    placementFrame = null
+    void placeBubble()
+  })
 }
 
 async function placeBubble() {
@@ -66,18 +92,25 @@ async function placeBubble() {
   if (disposed || activeIndex.value === null || !root.value || !bubble.value)
     return
   const rect = root.value.getBoundingClientRect()
+  const visual = window.visualViewport
+  const viewport = {
+    left: visual?.offsetLeft ?? 0,
+    top: visual?.offsetTop ?? 0,
+    width: visual?.width || document.documentElement.clientWidth,
+    height: visual?.height || window.innerHeight,
+  }
+  const maxWidth = Math.max(1, viewport.width - 16)
+  bubble.value.style.maxWidth = `${maxWidth}px`
   const width = bubble.value.offsetWidth
   const height = bubble.value.offsetHeight
-  const viewportWidth = document.documentElement.clientWidth
+  if (height > viewport.height - 16) {
+    close()
+    return
+  }
   const anchor = rect.left + (activeIndex.value + 0.5) / props.bars.length * rect.width
-  const left = Math.max(8 + width / 2, Math.min(viewportWidth - 8 - width / 2, anchor))
-  const top = rect.top + 8
-  const below = top - height - 7 < 8
   position.value = {
-    left,
-    top: below ? top + (props.compact ? 5 : 7) + 7 : top - 7,
-    arrow: Math.max(8, Math.min(width - 8, anchor - left + width / 2)),
-    below,
+    ...placeProbeTooltip(anchor, rect.top + 8, props.compact ? 5 : 7, width, height, viewport),
+    maxWidth,
   }
 }
 
@@ -85,7 +118,7 @@ function select(index: number) {
   if (!props.bars.length)
     return
   activeIndex.value = Math.max(0, Math.min(props.bars.length - 1, index))
-  void placeBubble()
+  scheduleBubble()
 }
 
 function pickAt(clientX: number) {
@@ -122,10 +155,10 @@ function move(event: PointerEvent) {
 function up(event: PointerEvent) {
   if (pointerId !== event.pointerId)
     return
-  pointerId = null
   clearTimer()
   // Keep the bubble after lifting the finger, and clear the bar highlight at the same time.
   holdTimer = setTimeout(close, HOLD_MS)
+  releasePointer()
 }
 
 function leave() {
@@ -162,19 +195,30 @@ function outside(event: PointerEvent) {
     close()
 }
 
+function documentKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape')
+    close()
+}
+
 function bindOutside(open: boolean) {
   document.removeEventListener('pointerdown', outside, true)
+  document.removeEventListener('keydown', documentKeydown)
   window.removeEventListener('scroll', close, true)
   window.removeEventListener('resize', close)
+  window.visualViewport?.removeEventListener('resize', close)
+  window.visualViewport?.removeEventListener('scroll', close)
   if (open) {
     document.addEventListener('pointerdown', outside, true)
+    document.addEventListener('keydown', documentKeydown)
     window.addEventListener('scroll', close, { capture: true, passive: true })
     window.addEventListener('resize', close)
+    window.visualViewport?.addEventListener('resize', close)
+    window.visualViewport?.addEventListener('scroll', close)
   }
 }
 
 watch(() => activeIndex.value !== null, bindOutside)
-watch(text, () => void placeBubble())
+watch(text, scheduleBubble)
 watch([() => props.metric, () => props.name, () => props.bars.length], close)
 onBeforeUnmount(() => {
   disposed = true
@@ -203,14 +247,15 @@ onBeforeUnmount(() => {
       :class="{ selected: activeIndex === index, empty: bar[metric] === null }"
       :style="{ backgroundColor: metric === 'latency' ? bar.latencyColor : bar.lossColor }"
     >
-      <span v-if="metric === 'latency' && bar.showPeak" class="ping-peak" :style="{ backgroundColor: bar.peakColor }" />
+      <span class="ping-mean" aria-hidden="true" />
+      <span v-if="metric === 'latency' && bar.showPeak" class="ping-peak" :style="{ backgroundColor: bar.peakColor }" aria-hidden="true" />
     </span>
   </div>
   <Teleport to="body">
     <span
       v-if="activeIndex !== null && text" :id="bubbleId" ref="bubble"
       class="ping-bucket-bubble" :class="{ below: position.below }" role="tooltip"
-      :style="{ 'left': `${position.left}px`, 'top': `${position.top}px`, '--arrow-x': `${position.arrow}px` }"
+      :style="{ 'left': `${position.left}px`, 'top': `${position.top}px`, '--arrow-x': `${position.arrow}px`, 'maxWidth': `${position.maxWidth}px` }"
     >{{ text }}</span>
   </Teleport>
 </template>
@@ -243,25 +288,38 @@ onBeforeUnmount(() => {
   height: 100%;
   min-width: 0;
   border-radius: 1px;
+  transition: opacity 150ms ease-out;
+}
+.ping-mean {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background-color: inherit;
   transform-origin: center;
+  pointer-events: none;
   transition:
     transform 150ms ease-out,
-    filter 150ms ease-out,
-    opacity 150ms ease-out;
+    filter 150ms ease-out;
 }
 .ping-peak {
   position: absolute;
-  inset-inline: 0;
-  top: 0;
+  left: 50%;
+  top: -5px;
+  width: min(100%, 3px);
   height: 2px;
-  border-radius: 1px 1px 0 0;
+  border-radius: 2px;
+  transform: translateX(-50%);
   pointer-events: none;
 }
 .ping-bar.empty {
   opacity: 0.15;
 }
-.ping-bar.selected {
+.ping-bar.selected .ping-mean {
   transform: scaleY(1.6);
+  filter: saturate(1.14) brightness(1.04);
+}
+.ping-bar.selected .ping-peak {
   filter: saturate(1.14) brightness(1.04);
 }
 .ping-bar.empty.selected {
@@ -313,7 +371,8 @@ onBeforeUnmount(() => {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .ping-bar {
+  .ping-bar,
+  .ping-mean {
     transition: none;
   }
   .ping-bucket-bubble {
