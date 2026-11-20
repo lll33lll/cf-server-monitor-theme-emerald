@@ -1,47 +1,77 @@
 # Emerald 三网定制主题
 
-基于 [Tokinx/cf-server-monitor-theme-emerald](https://github.com/Tokinx/cf-server-monitor-theme-emerald) 改造的 CF Server Monitor 主题，保留 Emerald 原版风格，分别显示电信、联通、移动的延迟和丢包。
+基于 [Tokinx/Emerald](https://github.com/Tokinx/cf-server-monitor-theme-emerald) 改造的 CF Server Monitor 主题。保留原版外观，电信、联通、移动独立显示延迟和丢包。当前版本 **v1.2.13**。
 
-当前定制版本：**v1.2.12**。仅修改主题，不修改 CFSM Worker、探针或服务器配置。
+只修改主题，不修改 CFSM Worker、探针或服务器配置，也不自动切换线上主题。
 
-## 直接使用
+## 安装 / 升级
 
-CFSM **后台 → 主题设置 → 自定义主题 URL**，填入以下固定版本地址并保存：
+后台 → 主题商店 → 自定义主题 URL，填入固定版本：
 
 ```text
-https://github.com/lll33lll/cf-server-monitor-theme-emerald/tree/da3c59046cedc22612367f62e8780687dfc82d62
+https://github.com/lll33lll/cf-server-monitor-theme-emerald/tree/2d8a0915219d8127a778fa4846e429eddf61b0c6
 ```
 
-固定版本不会自动变化，推荐使用。也可选择滚动构建地址：
+也可在你自己的主题商店找到 **Emerald · 自用三网版**，刷新后台、加载版本，选择新版再切换。
+
+滚动构建地址：
 
 ```text
 https://github.com/lll33lll/cf-server-monitor-theme-emerald/tree/build
 ```
 
-- **源码在 `custom` 分支**：[查看源码](https://github.com/lll33lll/cf-server-monitor-theme-emerald/tree/custom)。`main` 保留上游基线与本使用说明。
-- **可安装产物在 `build` 分支**：含 `index.html`、`assets/`、`LICENSE`、`version.json`。不要把源码分支填进主题 URL。
-- 后端通常缓存分支引用约 1 小时、固定 SHA 约 24 小时。升级时换成新 SHA，避免旧缓存混用。
-- 后端需支持 GitHub 自定义主题 URL，并已有三网探测数据；主题无法生成后端未上报的数据。
+- 源码在 [`custom`](https://github.com/lll33lll/cf-server-monitor-theme-emerald/tree/custom)，安装产物在 `build`；`main` 保留上游基线与本说明。
+- `build` 含 `index.html`、`assets/`、许可和版本元数据。不要填写源码分支。
+- 商店读取 `build` 的最新构建提交，不需要重复添加条目；已经应用的固定 SHA 不会自动更新。
+- 后端通常缓存分支约 1 小时、固定 SHA 约 24 小时。升级时建议换新 SHA，避免旧资源混用。
 
-## 改动
+## 布局与交互
 
-- **卡片**：延迟、丢包两块面板，各自按电信 / 联通 / 移动三行竖排，不再合并线路统计。
-- **列表**：独立的三网延迟、三网丢包两列；手机可横向滚动。
-- **历史柱**：每条线路 20 格。窗口优先读 `/api/config.latency_window.hours`，缺省为 2 小时；保留后端实际时间戳和采样粒度。
-- **统计一致**：数字从同一组柱子的有效覆盖时间加权计算，不简单平均 20 个百分比，不混算其他线路。
-- **真实数据**：直接保留 `/api/servers` 中分线路 `ping[]` / `loss[]`；首页不新增逐节点历史请求。
-- **缓存与推送**：真实实时样本存入当前浏览器 localStorage，保留统计窗口外 15 分钟用于衔接；过滤旧推送，不把没有探测字段的资源更新当成新探测。
-- **柱子交互（v1.2.12）**：参照 LuminaPlus，点柱子就地显示「线路 · 时间范围 · 当前指标数值」的小气泡，不再弹出历史曲线卡片或进入详情。横向滑动切换柱子，抬手保留 2.5 秒，气泡和柱子高亮同步复位；点击空白、页面滚动也会收起。点到柱子缝隙也能选中，卡片与列表共用同一套交互。
-- **桌面与键盘**：鼠标悬停可查看；聚焦柱带后用左右方向键、Home、End 切换，Esc 收起。卡片其他区域仍进入节点详情，完整曲线保留在详情页。
-- **名称与开关**：支持后台自定义线路名称；关闭 `show_three_net_details` 时只显示实时三网数值，不显示历史柱。
-- **缺测**：无数据为 `—` / 灰柱；真实 100% 丢包为红柱、延迟 `—`；非零但不足 0.1% 的丢包显示 `<0.1%`。
-- **配色**：丢包连续热力色，0% 绿 → 3% 黄 → 10% 橙 → 30% 及以上红；延迟沿用 Emerald 分档配色。
+- 卡片：延迟、丢包两块面板，分别竖排电信 / 联通 / 移动；列表是独立的三网延迟、三网丢包列。
+- 每条线路 20 格，窗口优先读 `/api/config.latency_window.hours`，默认 2 小时。
+- 所有卡片、列表共用整分钟时间轴，切换视图不会改变分桶相位。
+- 点柱子显示该格时间范围与数值，横向滑动切换，抬手保留 2.5 秒，气泡与高亮同步复位。气泡独立渲染，不被卡片裁切。
+- 鼠标支持悬停，键盘支持左右方向键、Home、End、Esc；卡片其他区域进入详情页。
 
-本地缓存只在页面打开时采集，不同浏览器、不同主题的旧缓存互不共享。刚切换主题时，不保证与其他主题已经累积的柱子逐根相同。历史是后端窗口加真实实时采样的可用覆盖，不代表额外采集了完整逐包历史。
+## v1.2.13 修复
 
-## 开发与构建
+### 均值与峰值不混用
 
-切换到 `custom` 分支，使用 Node 24 与 Bun 1.3.14：
+- 延迟数字仍为近窗口平均值；柱身颜色仍由该格平均延迟决定。
+- **顶部小色标单独提示更高色档的真实峰值**，点柱子同时显示平均值与峰值。比如平均 238 ms、峰值 241 ms，主体黄色、顶部红色；不会把峰值冒充成平均延迟。
+- 不调整阈值、不强制锁红：60 / 120 / 180 / 240 ms 的延迟色阶保持不变。
+- 时间窗口滚动、旧事件移出窗口时，标记正常退出。后台抽样、未打开页面时的缺口不能由主题凭空还原。
+
+### 增量数据与缓存
+
+- WS 的延迟、丢包按字段分别合并；省略字段不再误清空另一项。显式 null / false 仍保持缺测 / 禁用语义。
+- 接收消息时立即记录真实探测变化，与一秒页面播放解耦；批次中间样本不再被播放队列覆盖或漏记。
+- 变化无旧版 20 秒采样门槛；重复值压缩，状态延续只到实际收到的心跳，不作为新探测，也不跨关闭页面 / 离线缺口无限填充。
+- 使用紧凑 v2 缓存，保留窗口外 15 分钟衔接；兼容旧版有效样本。页面隐藏、关闭时及时保存。
+- 同源、同一浏览器存在 LuminaPlus 缓存时，只读接续其已有真实样本，**不写入、不删除它的缓存**。不同浏览器、域名仍互相独立。
+- 每 5 分钟同步一次现有聚合 `/api/servers` 快照，重连 / 回到前台时同步；首页不新增逐节点历史轮询。
+
+### 连带修复
+
+- 详情多线路曲线不再把所有任务合计截成 500 条，保留各线路完整所选时间窗。
+- 资源与 Ping 图同节点、同时间档共用历史请求，打开详情时复用已有历史记录回填探测缓存。
+- 资源历史保留接口实际采样行，不再人为造 15 分钟空槽；未提供的历史流量计数保持缺测，不补 0。
+- 快速切节点 / 时间档后，旧请求响应不覆盖新图表；增量资源更新不把省略的 CPU、内存、速率等字段变成 0。
+- 硬件总量随有效上报更新；旧快照不使实时状态倒退。
+
+## 数据语义
+
+数字按同一窗口的有效覆盖时间加权计算，不混算运营商、不简单平均 20 个百分比。
+
+无数据 `—` / 灰柱，真实 100% 丢包红柱、延迟缺测；非零且不足 0.1% 的丢包显示 `<0.1%`。丢包连续热力色：0% 绿、3% 黄、10% 橙、30% 及以上红。
+
+保留后台自定义线路名称。关闭 `show_three_net_details` 时只显示实时三网数字；价格、背景、公告等原版配置保持兼容。完整配置 JSON 见 [上游说明](https://github.com/Tokinx/cf-server-monitor-theme-emerald/blob/main/README.md)。
+
+本地缓存只在页面运行时积累；隐私模式 / 存储配额限制下，内存采样仍工作但不能保证刷新后保留。可用历史不等于完整逐包历史。
+
+## 开发与校验
+
+切换 `custom`，Node 24 + Bun 1.3.14：
 
 ```bash
 bun install --frozen-lockfile
@@ -49,16 +79,10 @@ bun run lint
 bun run build
 ```
 
-产物在 `dist/`。`custom` 的源码变更通过 Actions **Publish Three-Net Theme** 构建至 `build`，不自动修改你的 CFSM 在线主题设置。
+产物在 `dist/`；Actions **Publish Three-Net Theme** 发布至 `build`，不会自动应用到你的 CFSM。
 
-主题配置 JSON、背景、公告和其他原版参数保持兼容，完整原版说明见 [上游 README](https://github.com/Tokinx/cf-server-monitor-theme-emerald/blob/main/README.md)。
+本版通过代码检查、类型检查、生产构建、静态依赖核对，并用同一组真实推送回放核对字段合并、变化保留、缓存读写与历史请求复用。实际浏览器缓存无法通过远程 API 读取，因此不声称每个用户过去看到的差异都只有一个根因。
 
-本次发布的代码检查、类型检查、生产构建已通过；已核对公开构建归档中的静态资源引用，无缺失相对依赖。这不替代在你的浏览器中实际使用后的验证。
+## 来源与许可
 
-## 致谢与许可
-
-- [Tokinx/Emerald](https://github.com/Tokinx/cf-server-monitor-theme-emerald)
-- [CFSM-Theme-LuminaPlus](https://github.com/volcano-1025/CFSM-Theme-LuminaPlus)
-- [CF-Server-Monitor](https://github.com/huilang-me/CF-Server-Monitor)
-
-[MIT](./LICENSE)
+[MIT](./LICENSE)。感谢 [Tokinx/Emerald](https://github.com/Tokinx/cf-server-monitor-theme-emerald)、[CFSM-Theme-LuminaPlus](https://github.com/volcano-1025/CFSM-Theme-LuminaPlus) 和 [CF-Server-Monitor](https://github.com/huilang-me/CF-Server-Monitor)。
