@@ -50,11 +50,13 @@ export interface NodeStatusPing {
   max: number
 }
 
-/** 一小时延迟窗口中的单个 2 分钟桶（已按 ct/cu/cm/bd 聚合） */
+/** Native history snapshot; retain separate carriers and original timestamps. */
 export interface PingWindowPoint {
   time: string
   latency: number | null
   loss: number | null
+  /** Keep per-carrier values; aggregate values cannot reconstruct separate networks. */
+  lines?: Record<string, { latency: number | null, loss: number | null }>
 }
 
 export interface NodeStatus {
@@ -84,8 +86,11 @@ export interface NodeStatus {
   online: boolean
   uptime: number
   ping?: Record<string, NodeStatusPing>
-  /** /api/servers 返回的一小时延迟窗口（30 桶，旧→新），由适配器聚合生成 */
+  /** /api/servers native window, oldest first. Window size is supplied by /api/config. */
   pingWindow?: PingWindowPoint[]
+  /** False for a WS delta without probe fields: do not resample inherited values. */
+  pingSample?: boolean
+  pingSampleKeys?: string[]
 }
 
 export interface StatusRecord {

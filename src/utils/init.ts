@@ -119,7 +119,7 @@ class InitManager {
   private async loadNodes(): Promise<void> {
     try {
       const { clients, statuses, latestReportUpdates, sysConfig } = await fetchAllServers()
-      // 后端开关控制：关闭时忽略 ping/loss 窗口并隐藏首页卡片/列表的延迟丢包信息
+      // 后端开关关闭时不消费历史窗口，卡片/列表显示三网实时值。
       const showThreeNetDetails = sysConfig?.show_three_net_details === undefined
         ? true
         : isEnabledValue(sysConfig.show_three_net_details)
@@ -138,16 +138,7 @@ class InitManager {
           if (!rawSamples.length)
             continue
 
-          const sorted = rawSamples.sort((a, b) => a.ts - b.ts)
-          const uuid = getDisplayUuid(apiIndex, update.serverId)
-
-          this.applyLiveSample(apiIndex, sorted.at(-1)!)
-
-          if (sorted.length > 1) {
-            const historical = sorted.slice(0, -1)
-            this.liveSampleQueues.set(uuid, historical)
-            this.livePlaybackTimes.set(uuid, historical[0]!.ts)
-          }
+          this.enqueueLiveSamples(apiIndex, update.serverId, rawSamples)
         }
       }
       this.flushPendingStatuses()
@@ -168,6 +159,8 @@ class InitManager {
     const uuid = getDisplayUuid(apiIndex, sample.serverId)
     const currentNode = this.nodesStore.nodesByUuid.get(uuid)
     const current = this.pendingStatuses.get(uuid) ?? currentNode
+    if (current && sample.ts < Date.parse(current.time))
+      return
     const status = adaptServer({
       id: sample.serverId,
       ...sample.data,
@@ -208,27 +201,15 @@ class InitManager {
         status.gpu = current.gpu
       if (!sampleHasField(sample.data, 'temp'))
         status.temp = current.temp
-      if (!sampleHasField(
-        sample.data,
-        'ping_ct',
-        'ping_cu',
-        'ping_cm',
-        'ping_bd',
-        'ping_node_1',
-        'ping_node_2',
-        'ping_node_3',
-        'ping_node_4',
-        'loss_ct',
-        'loss_cu',
-        'loss_cm',
-        'loss_bd',
-        'loss_node_1',
-        'loss_node_2',
-        'loss_node_3',
-        'loss_node_4',
-      )) {
-        status.ping = current.ping
+      const reported = new Set(status.pingSampleKeys ?? [])
+      status.ping = { ...current.ping, ...status.ping }
+      for (const key of reported) {
+        // An explicit null/false update clears that carrier, rather than keeping a stale value.
+        if (!sampleHasField(sample.data, `ping_${key}`, `loss_${key}`))
+          delete status.ping[key]
       }
+      if (!reported.size)
+        status.pingSample = false
     }
 
     this.queueNodeStatuses({ [uuid]: status })
@@ -470,6 +451,7 @@ class InitManager {
     this.liveSampleQueues.clear()
     this.livePlaybackTimes.clear()
     this.pendingStatuses.clear()
+    this.nodesStore.savePingCache()
     this.nodesStore.updateWsState('disconnected', 0)
   }
 }

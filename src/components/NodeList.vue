@@ -9,6 +9,7 @@ import { DataTooltip } from '@/components/ui/data-tooltip'
 import { ProgressThin } from '@/components/ui/progress-thin'
 import { useBackgroundSurface } from '@/composables/useBackgroundSurface'
 import { useAppStore } from '@/stores/app'
+import { useNodesStore } from '@/stores/nodes'
 import { getApiAssetUrl } from '@/utils/api'
 import { formatBytesPerSecondWithConfig, formatBytesWithConfig, formatUptimeWithFormat, getStatus } from '@/utils/helper'
 import { formatOfflineTime, getCustomTags, getPriceTags, getRemainingTimeTagClass, getTrafficUsed, getTrafficUsedPercentage, hasRegion, showTrafficProgress } from '@/utils/nodeHelper'
@@ -36,6 +37,8 @@ const rowStaggerMs = 35
 const rowStaggerLimit = 12
 
 const appStore = useAppStore()
+const nodesStore = useNodesStore()
+const pingWindowLabel = computed(() => nodesStore.showThreeNetDetails ? `近${nodesStore.pingHistoryHours}小时平均` : '实时')
 const { pickSurfaceClass } = useBackgroundSurface()
 
 // show_price 关闭时访客不可见价格，仅保留剩余时间（管理员不受影响）
@@ -51,7 +54,8 @@ const columns: ColumnConfig[] = [
   { key: 'disk', label: '硬盘', width: '100px', sortable: true },
   { key: 'traffic', label: '流量', width: '100px', sortable: true },
   { key: 'rate', label: '速率', width: '80px', sortable: true },
-  { key: 'latency', label: '延迟', width: '136px', sortable: false },
+  { key: 'latency', label: '三网延迟', width: '160px', sortable: false },
+  { key: 'loss', label: '三网丢包', width: '160px', sortable: false },
 ]
 
 const sortKey = ref<string>('')
@@ -166,6 +170,7 @@ function getRowTransitionStyle(index: number): Record<string, string> {
           <span class="text-xs text-muted-foreground">
             {{ col.label }}{{ col.sortable && sortKey === col.key ? (sortDir === 1 ? ' ↑' : ' ↓') : '' }}
           </span>
+          <span v-if="col.key === 'latency' || col.key === 'loss'" class="ml-2 text-[9px] text-muted-foreground">{{ pingWindowLabel }}</span>
         </div>
       </div>
 
@@ -179,7 +184,7 @@ function getRowTransitionStyle(index: number): Record<string, string> {
         <div
           v-for="(node, index) in sortedNodes"
           :key="getRowTransitionKey(node)"
-          class="relative flex h-16 cursor-pointer flex-col justify-center rounded-lg px-2 shadow-[0_0_4px,0_0_0_1px] shadow-transparent transition-all bg-background/60 hover:bg-background hover:shadow-emerald-600/10"
+          class="relative flex min-h-26 py-3 cursor-pointer flex-col justify-center rounded-lg px-2 shadow-[0_0_4px,0_0_0_1px] shadow-transparent transition-all bg-background/60 hover:bg-background hover:shadow-emerald-600/10"
           :class="[pickSurfaceClass('', 'backdrop-blur-sm'), !node.online && '!shadow-red-600/10']"
           :style="getRowTransitionStyle(index)"
           @click="handleClick(node)"
@@ -234,18 +239,9 @@ function getRowTransitionStyle(index: number): Record<string, string> {
                 </div>
               </div>
 
-              <!-- 三网和 BGP 实时延迟 -->
-              <div v-else-if="col.key === 'latency'" class="flex items-center">
-                <NodePingListCell
-                  :node="node"
-                  role="button"
-                  tabindex="0"
-                  class="outline-none"
-                  :aria-label="`${node.name} 三网和 BGP 实时延迟`"
-                  @click.stop="openPingDialog(node)"
-                  @keydown.enter.stop.prevent="openPingDialog(node)"
-                  @keydown.space.stop.prevent="openPingDialog(node)"
-                />
+              <!-- Three separate carriers in both metric columns. -->
+              <div v-else-if="col.key === 'latency' || col.key === 'loss'" class="flex min-w-0 items-center">
+                <NodePingListCell :node="node" :metric="col.key" @open="openPingDialog(node)" />
               </div>
 
               <!-- 操作系统 -->

@@ -441,6 +441,8 @@ function getTaskColor(taskId: number): string {
 }
 
 function finiteMetric(value: unknown): number | undefined {
+  if (value === null || value === undefined || typeof value === 'boolean' || value === '')
+    return undefined
   const number = Number(value)
   return Number.isFinite(number) ? number : undefined
 }
@@ -527,7 +529,7 @@ const PING_TASK_KEYS: Record<number, string> = {
 }
 
 function appendRealtimePing(node: NonNullable<typeof nodeInfo.value>): void {
-  if (selectedView.value !== DEFAULT_CHART_TIME_RANGE.label || !node.time || !node.ping)
+  if (selectedView.value !== DEFAULT_CHART_TIME_RANGE.label || !node.online || node.pingSample === false || !node.time || !node.ping)
     return
 
   const time = node.time
@@ -535,15 +537,15 @@ function appendRealtimePing(node: NonNullable<typeof nodeInfo.value>): void {
   const records = taskIds.flatMap((taskId) => {
     const key = tasks.value.find(task => task.id === taskId)?.key ?? PING_TASK_KEYS[taskId]
     const ping = key ? node.ping?.[key] : undefined
-    if (!ping)
+    if (!key || (node.pingSampleKeys && !node.pingSampleKeys.includes(key)) || !ping || (!Number.isFinite(ping.latest) && !Number.isFinite(ping.loss)))
       return []
 
     return [{
       client: node.uuid,
       task_id: taskId,
       time,
-      value: ping.latest > 0 ? ping.latest : -1,
-      loss: ping.loss,
+      value: ping.latest > 0 && !(ping.loss >= 100) ? ping.latest : -1,
+      loss: Number.isFinite(ping.loss) ? ping.loss : undefined,
       metric: 'latency' as const,
     }]
   })
@@ -571,7 +573,7 @@ const packetLossMarkers = computed(() => {
   for (const task of selectedTasks.value) {
     const points = new Set<number>()
     const taskLossRecords = remoteData.value.filter(rec =>
-      rec.task_id === task.id && ((rec.loss ?? 0) > 0 || (rec.metric !== 'loss' && rec.value < 0)),
+      rec.task_id === task.id && (rec.loss ?? 0) > 0,
     )
 
     for (const record of taskLossRecords) {

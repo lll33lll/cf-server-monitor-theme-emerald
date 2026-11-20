@@ -1,6 +1,7 @@
 import type { CurrencyCode } from '@/utils/financeHelper'
 import type { Client, NodeStatus, NodeStatusPing, PingRecord, PingWindowPoint, StatusRecord } from '@/utils/rpc'
 import { isSupportedCurrency, normalizedCurrencyMap } from '@/utils/financeHelper'
+import { pingLineValue, probeNumber } from '@/utils/threeNetPing'
 import { requestTurnstileToken } from '@/utils/turnstile'
 
 const ONLINE_THRESHOLD_MS = 5 * 60 * 1000
@@ -134,6 +135,10 @@ export interface LatencyWindowPoint {
   cu?: number | string | boolean | null
   cm?: number | string | boolean | null
   bd?: number | string | boolean | null
+  node_1?: number | string | boolean | null
+  node_2?: number | string | boolean | null
+  node_3?: number | string | boolean | null
+  node_4?: number | string | boolean | null
 }
 
 export interface CfServer {
@@ -965,8 +970,9 @@ function trafficLimitType(value: unknown): string {
 }
 
 function pingEntry(name: string, latency: unknown, loss: unknown): NodeStatusPing {
-  const latest = finiteNumber(latency)
-  const lossValue = finiteNumber(loss)
+  const latest = probeNumber(latency) ?? Number.NaN
+  const percent = probeNumber(loss)
+  const lossValue = percent !== null && percent <= 100 ? percent : Number.NaN
   return { name, latest, avg: latest, tail: latest, loss: lossValue, min: latest, max: latest }
 }
 
@@ -1003,77 +1009,28 @@ function pingFieldPresent(server: CfServer, field: keyof CfServer): boolean {
   return isPingFieldPresent(server[field])
 }
 
-const PING_WINDOW_PROVIDER_KEYS = ['ct', 'cu', 'cm', 'bd'] as const
-
-function pingWindowNumber(value: unknown): number | null {
-  if (value === false || value === null || value === undefined || value === '')
-    return null
-  const number = Number.parseFloat(String(value))
-  return Number.isFinite(number) ? number : null
-}
-
-function buildPingWindowPoint(
-  ts: number,
-  pingPoint: LatencyWindowPoint | undefined,
-  lossPoint: LatencyWindowPoint | undefined,
-): PingWindowPoint | null {
-  const latencyValues = PING_WINDOW_PROVIDER_KEYS
-    .map(key => pingWindowNumber(pingPoint?.[key]))
-    .filter((value): value is number => value !== null && value > 0)
-  const lossValues = PING_WINDOW_PROVIDER_KEYS
-    .map(key => pingWindowNumber(lossPoint?.[key]))
-    .filter((value): value is number => value !== null && value >= 0)
-
-  if (!latencyValues.length && !lossValues.length)
-    return null
-
-  return {
-    time: new Date(ts).toISOString(),
-    latency: latencyValues.length
-      ? latencyValues.reduce((sum, value) => sum + value, 0) / latencyValues.length
-      : null,
-    loss: lossValues.length
-      ? lossValues.reduce((sum, value) => sum + value, 0) / lossValues.length
-      : null,
-  }
-}
-
-/** 将 /api/servers 的 ping/loss 窗口（旧→新）按时间戳对齐聚合成延迟/丢包点 */
+/** Keep every carrier and the union of ping/loss timestamps, including loss-only timeouts. */
 function buildPingWindow(server: CfServer): PingWindowPoint[] | undefined {
-  const ping = Array.isArray(server.ping) ? server.ping : undefined
-  const loss = Array.isArray(server.loss) ? server.loss : undefined
-  if (!ping?.length && !loss?.length)
-    return undefined
-
-  const lossByTs = new Map<number, LatencyWindowPoint>()
-  for (const point of loss ?? []) {
-    const ts = timestamp(point.ts, 0)
-    if (ts > 0)
-      lossByTs.set(ts, point)
-  }
-
-  const points: PingWindowPoint[] = []
-  for (const point of ping ?? []) {
-    const ts = timestamp(point.ts, 0)
-    if (ts <= 0)
-      continue
-    const point2 = buildPingWindowPoint(ts, point, lossByTs.get(ts))
-    if (point2)
-      points.push(point2)
-  }
-
-  // 延迟窗口为空但丢包有数据时，以丢包的 ts 生成点
-  if (!points.length) {
-    for (const point of loss ?? []) {
-      const ts = timestamp(point.ts, 0)
-      if (ts <= 0)
-        continue
-      const point2 = buildPingWindowPoint(ts, undefined, point)
-      if (point2)
-        points.push(point2)
+  const ping = Array.isArray(server.ping) ? server.ping : []
+  const loss = Array.isArray(server.loss) ? server.loss : []
+  const pingByTs = new Map(ping.map(point => [timestamp(point.ts, 0), point]))
+  const lossByTs = new Map(loss.map(point => [timestamp(point.ts, 0), point]))
+  const times = [...new Set([...pingByTs.keys(), ...lossByTs.keys()])].filter(ts => ts > 0).sort((a, b) => a - b)
+  const points = times.map((ts) => {
+    const lines = Object.fromEntries(PING_TASKS.map(task => [task.key, pingLineValue(
+      (pingByTs.get(ts) as Record<string, unknown> | undefined)?.[task.key],
+      (lossByTs.get(ts) as Record<string, unknown> | undefined)?.[task.key],
+    )]))
+    const networks = ['ct', 'cu', 'cm'].map(key => lines[key]!)
+    const delays = networks.map(value => value.latency).filter((value): value is number => value !== null)
+    const losses = networks.map(value => value.loss).filter((value): value is number => value !== null)
+    return {
+      time: new Date(ts).toISOString(),
+      lines,
+      latency: delays.length ? delays.reduce((sum, value) => sum + value, 0) / delays.length : null,
+      loss: losses.length ? losses.reduce((sum, value) => sum + value, 0) / losses.length : null,
     }
-  }
-
+  })
   return points.length ? points : undefined
 }
 
@@ -1168,6 +1125,7 @@ export function adaptServer(server: CfServer, apiIndex: number): AdaptedServer {
       uptime: Math.max(0, Math.floor((now - bootTime) / 1000)),
       ping,
       pingWindow,
+      pingSampleKeys: PING_TASKS.filter(task => Object.hasOwn(server, task.latencyField) || Object.hasOwn(server, task.lossField)).map(task => task.key),
     },
   }
 }
@@ -1241,7 +1199,7 @@ export async function fetchHistory(uuid: string, hours = 1): Promise<StatusRecor
 
 export async function fetchPingHistory(uuid: string, hours = 1): Promise<{
   records: PingRecord[]
-  tasks: Array<{ id: number, key: PingTaskKey, name: string, interval: number, loss: number }>
+  tasks: Array<{ id: number, key: PingTaskKey, name: string, interval: number, loss?: number }>
 }> {
   const source = getServerSource(uuid)
   const rows = await request<HistoryRow[]>(`/api/history/all?id=${encodeURIComponent(source.serverId)}&hours=${hours}`, source.apiIndex)
@@ -1261,16 +1219,17 @@ export async function fetchPingHistory(uuid: string, hours = 1): Promise<{
         continue
 
       availableTasks.add(task.id)
-      const lossValue = hasLoss ? finiteNumber(lossRaw) : 0
-      const latency = hasLatency ? finiteNumber(latencyValue) : 0
+      const normalized = pingLineValue(latencyValue, lossRaw)
+      const lossValue = normalized.loss ?? undefined
+      const latency = normalized.latency
       records.push({
         client: uuid,
         task_id: task.id,
         time,
-        value: lossValue >= 100 || latency <= 0 ? -1 : latency,
+        value: latency ?? -1,
         loss: lossValue,
       })
-      if (hasLoss) {
+      if (lossValue !== undefined) {
         const taskLosses = losses.get(task.id) ?? []
         taskLosses.push(lossValue)
         losses.set(task.id, taskLosses)
@@ -1285,7 +1244,9 @@ export async function fetchPingHistory(uuid: string, hours = 1): Promise<{
       key: task.key,
       name: pingTaskNames[task.key],
       interval: 60,
-      loss: (losses.get(task.id) ?? []).reduce((sum, value) => sum + value, 0) / Math.max(1, losses.get(task.id)?.length ?? 0),
+      loss: losses.get(task.id)?.length
+        ? losses.get(task.id)!.reduce((sum, value) => sum + value, 0) / losses.get(task.id)!.length
+        : undefined,
     })),
   }
 }
