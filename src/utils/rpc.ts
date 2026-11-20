@@ -56,7 +56,7 @@ export interface PingWindowPoint {
   latency: number | null
   loss: number | null
   /** Keep per-carrier values; aggregate values cannot reconstruct separate networks. */
-  lines?: Record<string, { latency: number | null, loss: number | null }>
+  lines?: Record<string, { latency?: number | null, loss?: number | null }>
 }
 
 export interface NodeStatus {
@@ -91,6 +91,7 @@ export interface NodeStatus {
   /** False for a WS delta without probe fields: do not resample inherited values. */
   pingSample?: boolean
   pingSampleKeys?: string[]
+  pingUpdates?: NonNullable<PingWindowPoint['lines']>
 }
 
 export interface StatusRecord {
@@ -110,10 +111,10 @@ export interface StatusRecord {
   disk_total: number
   net_in: number
   net_out: number
-  net_total_up: number
-  net_total_down: number
-  net_monthly_up: number
-  net_monthly_down: number
+  net_total_up: number | null
+  net_total_down: number | null
+  net_monthly_up: number | null
+  net_monthly_down: number | null
   process: number
   connections: number
   connections_udp: number

@@ -1,7 +1,8 @@
 import type { CurrencyCode } from '@/utils/financeHelper'
 import type { Client, NodeStatus, NodeStatusPing, PingRecord, PingWindowPoint, StatusRecord } from '@/utils/rpc'
+import { useNodesStore } from '@/stores/nodes'
 import { isSupportedCurrency, normalizedCurrencyMap } from '@/utils/financeHelper'
-import { pingLineValue, probeNumber } from '@/utils/threeNetPing'
+import { pingLineValue, probeNumber, probeUpdatesFromWire } from '@/utils/threeNetPing'
 import { requestTurnstileToken } from '@/utils/turnstile'
 
 const ONLINE_THRESHOLD_MS = 5 * 60 * 1000
@@ -119,6 +120,7 @@ export interface SiteConfig {
 }
 
 export interface SysConfig {
+  latency_window?: { points?: number, hours?: number }
   show_price?: boolean
   show_expire?: boolean
   show_tf?: boolean
@@ -142,6 +144,8 @@ export interface LatencyWindowPoint {
 }
 
 export interface CfServer {
+  sample_timestamp?: number | string
+  report_timestamp?: number | string
   id: string
   name?: string
   server_group?: string
@@ -522,8 +526,10 @@ function numberField(source: Record<string, unknown>, ...keys: string[]): number
 }
 
 function timestamp(value: unknown, fallback = Date.now()): number {
-  const number = finiteNumber(value)
-  if (!number)
+  let number = (typeof value === 'number' || typeof value === 'string') && String(value).trim() ? Number(value) : Number.NaN
+  if (!Number.isFinite(number) && typeof value === 'string')
+    number = Date.parse(value)
+  if (!Number.isFinite(number) || number <= 0)
     return fallback
   return number < 1e12 ? number * 1000 : number
 }
@@ -1001,8 +1007,7 @@ const PING_TASKS: PingTaskDefinition[] = [
 function isPingFieldPresent(value: unknown): boolean {
   if (value === undefined || value === null || value === '' || value === false)
     return false
-  const number = Number.parseFloat(String(value))
-  return Number.isFinite(number)
+  return probeNumber(value) !== null
 }
 
 function pingFieldPresent(server: CfServer, field: keyof CfServer): boolean {
@@ -1017,11 +1022,17 @@ function buildPingWindow(server: CfServer): PingWindowPoint[] | undefined {
   const lossByTs = new Map(loss.map(point => [timestamp(point.ts, 0), point]))
   const times = [...new Set([...pingByTs.keys(), ...lossByTs.keys()])].filter(ts => ts > 0).sort((a, b) => a - b)
   const points = times.map((ts) => {
-    const lines = Object.fromEntries(PING_TASKS.map(task => [task.key, pingLineValue(
-      (pingByTs.get(ts) as Record<string, unknown> | undefined)?.[task.key],
-      (lossByTs.get(ts) as Record<string, unknown> | undefined)?.[task.key],
-    )]))
-    const networks = ['ct', 'cu', 'cm'].map(key => lines[key]!)
+    const pingPoint = pingByTs.get(ts) as Record<string, unknown> | undefined
+    const lossPoint = lossByTs.get(ts) as Record<string, unknown> | undefined
+    const wire: Record<string, unknown> = {}
+    for (const task of PING_TASKS) {
+      if (pingPoint && Object.hasOwn(pingPoint, task.key))
+        wire[task.latencyField] = pingPoint[task.key]
+      if (lossPoint && Object.hasOwn(lossPoint, task.key))
+        wire[task.lossField] = lossPoint[task.key]
+    }
+    const lines = probeUpdatesFromWire(wire)
+    const networks = ['ct', 'cu', 'cm'].map(key => pingLineValue(lines[key]?.latency, lines[key]?.loss))
     const delays = networks.map(value => value.latency).filter((value): value is number => value !== null)
     const losses = networks.map(value => value.loss).filter((value): value is number => value !== null)
     return {
@@ -1041,7 +1052,7 @@ export function adaptServer(server: CfServer, apiIndex: number): AdaptedServer {
   sourceRegistry.set(uuid, { apiIndex, baseUrl, serverId: server.id })
 
   const billing = adaptServerBilling(server)
-  const updatedAt = timestamp(wire.report_timestamp ?? server.last_updated ?? server.timestamp, 0)
+  const updatedAt = timestamp(wire.sample_timestamp ?? wire.report_timestamp ?? server.last_updated ?? server.timestamp, 0)
   const load = String(server.load_avg ?? '').split(WHITESPACE_REGEX).map(finiteNumber)
   const now = Date.now()
   const bootTime = timestamp(server.boot_time, 0)
@@ -1122,9 +1133,10 @@ export function adaptServer(server: CfServer, apiIndex: number): AdaptedServer {
       connections: finiteNumber(server.tcp_conn),
       connections_udp: finiteNumber(server.udp_conn),
       online,
-      uptime: Math.max(0, Math.floor((now - bootTime) / 1000)),
+      uptime: bootTime > 0 ? Math.max(0, Math.floor((now - bootTime) / 1000)) : 0,
       ping,
       pingWindow,
+      pingUpdates: probeUpdatesFromWire(wire),
       pingSampleKeys: PING_TASKS.filter(task => Object.hasOwn(server, task.latencyField) || Object.hasOwn(server, task.lossField)).map(task => task.key),
     },
   }
@@ -1137,8 +1149,8 @@ export async function fetchAllServers(): Promise<{
   /** 首个带 sysConfig 的响应（多后端取第一个），无则 undefined */
   sysConfig?: SysConfig
 }> {
-  sourceRegistry.clear()
   const responses = await Promise.all(getApiBases().map((_, index) => request<ServersResponse>('/api/servers', index)))
+  sourceRegistry.clear()
   const clients: Record<string, Client> = {}
   const statuses: Record<string, NodeStatus> = {}
   const latestReportUpdates: Array<{ apiIndex: number, updates: LatestReportUpdate[] }> = []
@@ -1163,6 +1175,14 @@ export async function fetchAllServers(): Promise<{
 function rowToStatusRecord(uuid: string, row: HistoryRow): StatusRecord {
   const wire = row as Record<string, unknown>
   const time = new Date(timestamp(row.timestamp)).toISOString()
+  const counter = (...keys: string[]): number | null => {
+    for (const key of keys) {
+      const value = probeNumber(wire[key])
+      if (value !== null)
+        return value
+    }
+    return null
+  }
   const load = String(row.load_avg ?? '').split(WHITESPACE_REGEX).map(finiteNumber)
   return {
     client: uuid,
@@ -1181,19 +1201,51 @@ function rowToStatusRecord(uuid: string, row: HistoryRow): StatusRecord {
     disk_total: finiteNumber(row.disk_total) * MB,
     net_in: numberField(wire, 'net_in_speed', 'net_in'),
     net_out: numberField(wire, 'net_out_speed', 'net_out'),
-    net_total_up: numberField(wire, 'net_tx', 'net_total_up', 'net_tx_monthly'),
-    net_total_down: numberField(wire, 'net_rx', 'net_total_down', 'net_rx_monthly'),
-    net_monthly_up: numberField(wire, 'net_tx_monthly', 'net_tx'),
-    net_monthly_down: numberField(wire, 'net_rx_monthly', 'net_rx'),
+    net_total_up: counter('net_tx', 'net_total_up', 'net_tx_monthly'),
+    net_total_down: counter('net_rx', 'net_total_down', 'net_rx_monthly'),
+    net_monthly_up: counter('net_tx_monthly', 'net_tx'),
+    net_monthly_down: counter('net_rx_monthly', 'net_rx'),
     process: finiteNumber(row.processes),
     connections: finiteNumber(row.tcp_conn),
     connections_udp: finiteNumber(row.udp_conn),
   }
 }
 
-export async function fetchHistory(uuid: string, hours = 1): Promise<StatusRecord[]> {
+const historyRequests = new Map<string, { at: number, promise: Promise<HistoryRow[]> }>()
+
+async function fetchHistoryRows(uuid: string, hours: number): Promise<HistoryRow[]> {
   const source = getServerSource(uuid)
-  const rows = await request<HistoryRow[]>(`/api/history/all?id=${encodeURIComponent(source.serverId)}&hours=${hours}`, source.apiIndex)
+  const viewer = authHeaders(source.baseUrl).get('Authorization') ?? ''
+  const key = `${source.baseUrl}|${source.serverId}|${hours}|${viewer}`
+  const cached = historyRequests.get(key)
+  if (cached && Date.now() - cached.at < 15_000)
+    return cached.promise
+  const promise = request<HistoryRow[]>(`/api/history/all?id=${encodeURIComponent(source.serverId)}&hours=${hours}`, source.apiIndex)
+    .then((rows) => {
+      if (!Array.isArray(rows))
+        throw new ApiError('历史接口返回格式异常', 502, source.apiIndex)
+      const valid = rows.filter(row => timestamp(row.timestamp, 0) > 0)
+      const samples = valid.map(row => ({
+        time: new Date(timestamp(row.timestamp, 0)).toISOString(),
+        latency: null,
+        loss: null,
+        lines: probeUpdatesFromWire(row as Record<string, unknown>),
+      }))
+      useNodesStore().seedPingSamples(uuid, samples)
+      return valid
+    })
+    .catch((error) => {
+      historyRequests.delete(key)
+      throw error
+    })
+  if (historyRequests.size >= 16)
+    historyRequests.delete(historyRequests.keys().next().value!)
+  historyRequests.set(key, { at: Date.now(), promise })
+  return promise
+}
+
+export async function fetchHistory(uuid: string, hours = 1): Promise<StatusRecord[]> {
+  const rows = await fetchHistoryRows(uuid, hours)
   return (rows ?? []).map(row => rowToStatusRecord(uuid, row))
 }
 
@@ -1201,8 +1253,7 @@ export async function fetchPingHistory(uuid: string, hours = 1): Promise<{
   records: PingRecord[]
   tasks: Array<{ id: number, key: PingTaskKey, name: string, interval: number, loss?: number }>
 }> {
-  const source = getServerSource(uuid)
-  const rows = await request<HistoryRow[]>(`/api/history/all?id=${encodeURIComponent(source.serverId)}&hours=${hours}`, source.apiIndex)
+  const rows = await fetchHistoryRows(uuid, hours)
   const records: PingRecord[] = []
   const losses = new Map<number, number[]>()
   const availableTasks = new Set<number>()

@@ -1,8 +1,10 @@
 import type { Client, NodeStatus, NodeStatusPing, PingWindowPoint } from '@/utils/rpc'
+import type { PingLineUpdate } from '@/utils/threeNetPing'
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { parseNodeGroups } from '@/utils/groupHelper'
-import { pingLineValue } from '@/utils/threeNetPing'
+import { decodeProbeNodes, encodeProbeSample, LEGACY_PROBE_CACHE_KEY, LUMINA_PROBE_CACHE_KEY, PROBE_CACHE_KEY } from '@/utils/probeCache'
+import { PROBE_KEYS, probeNumber } from '@/utils/threeNetPing'
 
 /** 流量限制类型 */
 export type TrafficLimitType = 'up' | 'down' | 'min' | 'max' | 'sum'
@@ -73,6 +75,7 @@ export interface NodeData {
   ping?: Record<string, NodeStatusPing>
   pingSample?: boolean
   pingSampleKeys?: string[]
+  pingUpdates?: Record<string, PingLineUpdate>
 }
 
 /** WebSocket 连接状态 */
@@ -80,6 +83,9 @@ export type WsConnectionState = 'disconnected' | 'connecting' | 'connected' | 'r
 
 /** 状态数据（用于更新） */
 interface StatusData {
+  ram_total?: number
+  swap_total?: number
+  disk_total?: number
   online: boolean
   time: string
   cpu: number
@@ -104,6 +110,7 @@ interface StatusData {
   ping?: Record<string, NodeStatusPing>
   pingSample?: boolean
   pingSampleKeys?: string[]
+  pingUpdates?: Record<string, PingLineUpdate>
 }
 
 const EARTH_SNAPSHOT_INTERVAL_MS = 60_000
@@ -131,7 +138,8 @@ const useNodesStore = defineStore('nodes', () => {
   const earthNodes = ref<NodeData[]>([])
   const pingHistoryByUuid = ref<Record<string, PingHistoryPoint[]>>({})
   const livePingHistoryByUuid = ref<Record<string, PingWindowPoint[]>>({})
-  const cacheKey = 'emerald-three-net-live-v1'
+  const cacheKey = PROBE_CACHE_KEY
+  const pingObservedThroughByUuid = ref<Record<string, number>>({})
   let cacheHydrated = false
   let cacheTimer: ReturnType<typeof setTimeout> | null = null
   const wsConnectionState = ref<WsConnectionState>('disconnected')
@@ -172,26 +180,28 @@ const useNodesStore = defineStore('nodes', () => {
 
   function trimPingHistory(points: PingWindowPoint[]): PingWindowPoint[] {
     const oldest = Date.now() - pingHistoryHours.value * 3_600_000 - 15 * 60_000
-    return points.filter(point => Date.parse(point.time) >= oldest && Date.parse(point.time) <= Date.now() + 120_000).slice(-4320)
+    return points.filter(point => Date.parse(point.time) >= oldest && Date.parse(point.time) <= Date.now() + 120_000).slice(-16000)
   }
 
-  function hydratePingCache(): void {
+  function hydratePingCache(uuids: string[]): void {
     if (cacheHydrated)
       return
     cacheHydrated = true
     try {
-      const saved = JSON.parse(localStorage.getItem(cacheKey) ?? '{}') as Record<string, PingWindowPoint[]>
-      if (!saved || typeof saved !== 'object' || Array.isArray(saved))
-        return
-      for (const [uuid, points] of Object.entries(saved).slice(0, 128)) {
-        if (!Array.isArray(points))
-          continue
-        livePingHistoryByUuid.value[uuid] = trimPingHistory(points.filter(point => point && typeof point.time === 'string' && point.lines).map(point => ({
-          time: point.time,
-          latency: null,
-          loss: null,
-          lines: Object.fromEntries(Object.entries(point.lines ?? {}).map(([key, value]) => [key, pingLineValue(value?.latency, value?.loss)])),
-        })))
+      // Only read LuminaPlus's real cache; never write to or remove another theme's storage.
+      const sources = [
+        decodeProbeNodes(localStorage.getItem(LUMINA_PROBE_CACHE_KEY), 'lumina'),
+        decodeProbeNodes(localStorage.getItem(LEGACY_PROBE_CACHE_KEY), 'legacy'),
+        decodeProbeNodes(localStorage.getItem(PROBE_CACHE_KEY), 'v2'),
+      ]
+      for (const id of uuids) {
+        for (const source of sources) {
+          const node = source[id]
+          if (!node)
+            continue
+          seedPingSamples(id, trimPingHistory(node.samples))
+          pingObservedThroughByUuid.value[id] = Math.max(pingObservedThroughByUuid.value[id] ?? 0, node.observedThrough)
+        }
       }
     }
     catch {}
@@ -205,8 +215,11 @@ const useNodesStore = defineStore('nodes', () => {
       const active = new Set(nodes.value.map(node => node.uuid))
       const saved = Object.fromEntries(Object.entries(livePingHistoryByUuid.value)
         .filter(([uuid]) => active.has(uuid)).slice(0, 128)
-        .map(([uuid, points]) => [uuid, trimPingHistory(points)]))
-      localStorage.setItem(cacheKey, JSON.stringify(saved))
+        .map(([uuid, points]) => [uuid, {
+          samples: trimPingHistory(points).map(encodeProbeSample),
+          observedThrough: pingObservedThroughByUuid.value[uuid] ?? 0,
+        }]))
+      localStorage.setItem(cacheKey, JSON.stringify({ v: 2, nodes: saved }))
     }
     catch {}
   }
@@ -290,6 +303,9 @@ const useNodesStore = defineStore('nodes', () => {
   function updateNodeStatus(node: NodeData, status: StatusData): NodeData {
     return {
       ...node,
+      mem_total: status.ram_total && status.ram_total > 0 ? status.ram_total : node.mem_total,
+      swap_total: status.swap_total !== undefined ? status.swap_total : node.swap_total,
+      disk_total: status.disk_total && status.disk_total > 0 ? status.disk_total : node.disk_total,
       online: status.online,
       time: status.time,
       cpu: status.cpu,
@@ -314,6 +330,7 @@ const useNodesStore = defineStore('nodes', () => {
       ping: status.ping,
       pingSample: status.pingSample,
       pingSampleKeys: status.pingSampleKeys,
+      pingUpdates: status.pingUpdates,
     }
   }
 
@@ -327,6 +344,9 @@ const useNodesStore = defineStore('nodes', () => {
       cpu: status.cpu,
       gpu: status.gpu,
       ram: status.ram,
+      ram_total: status.ram_total,
+      swap_total: status.swap_total,
+      disk_total: status.disk_total,
       swap: status.swap,
       load: status.load,
       load5: status.load5,
@@ -346,6 +366,7 @@ const useNodesStore = defineStore('nodes', () => {
       ping: status.ping,
       pingSample: status.pingSample,
       pingSampleKeys: status.pingSampleKeys,
+      pingUpdates: status.pingUpdates,
     }
   }
 
@@ -377,33 +398,69 @@ const useNodesStore = defineStore('nodes', () => {
     }
   }
 
-  /** Preserve actual sample timestamps and per-carrier values; never average networks into each other. */
-  function recordPingSample(uuid: string, status: NodeStatus): void {
-    if (!status.online || status.pingSample === false)
-      return
-    const time = Date.parse(status.time)
+  function noteProbeHeartbeat(uuid: string, time: number): void {
+    if (Number.isFinite(time) && time > 0 && time <= Date.now() + 120_000)
+      pingObservedThroughByUuid.value[uuid] = Math.max(pingObservedThroughByUuid.value[uuid] ?? 0, time)
+  }
+
+  /** Keep every changed metric. A partial update never clears the other metric or carrier. */
+  function recordPingUpdates(uuid: string, time: number, updates: Record<string, PingLineUpdate>, force = false): void {
     const now = Date.now()
-    if (!Number.isFinite(time) || time > now + 120_000 || time < now - pingHistoryHours.value * 3_600_000 - 15 * 60_000)
-      return
-    const keys = status.pingSampleKeys ?? Object.keys(status.ping ?? {})
-    const lines = Object.fromEntries(keys.map(key => [key, pingLineValue(status.ping?.[key]?.latest, status.ping?.[key]?.loss)]))
-    if (!keys.length)
+    if (!Number.isFinite(time) || time <= 0 || time > now + 120_000 || time < now - pingHistoryHours.value * 3_600_000 - 15 * 60_000)
       return
     const history = trimPingHistory(livePingHistoryByUuid.value[uuid] ?? [])
-    const previous = history.at(-1)
-    if (previous) {
-      const gap = time - Date.parse(previous.time)
-      const unchanged = JSON.stringify(previous.lines) === JSON.stringify(lines)
-      if (gap < (unchanged ? 60_000 : 20_000))
-        return
+    const exact = history.find(point => Date.parse(point.time) === time)
+    const lines: Record<string, PingLineUpdate> = {}
+    for (const key of PROBE_KEYS) {
+      const incoming = updates[key]
+      if (!incoming)
+        continue
+      const update: PingLineUpdate = {}
+      for (const metric of ['latency', 'loss'] as const) {
+        if (!Object.hasOwn(incoming, metric))
+          continue
+        const numeric = probeNumber(incoming[metric])
+        const value = metric === 'loss' && numeric !== null && numeric > 100 ? null : numeric
+        if (exact?.lines?.[key] && Object.hasOwn(exact.lines[key]!, metric) && exact.lines[key]![metric] === value)
+          continue
+        let previous: PingWindowPoint | undefined
+        if (!force) {
+          for (let index = history.length - 1; index >= 0; index--) {
+            const candidate = history[index]!
+            if (Date.parse(candidate.time) < time && candidate.lines?.[key] && Object.hasOwn(candidate.lines[key]!, metric)) {
+              previous = candidate
+              break
+            }
+          }
+          if (previous?.lines?.[key]?.[metric] === value && time - Date.parse(previous.time) < 60_000)
+            continue
+        }
+        update[metric] = value
+      }
+      if (Object.keys(update).length)
+        lines[key] = { ...exact?.lines?.[key], ...update }
     }
-    livePingHistoryByUuid.value[uuid] = [...history, {
-      time: status.time,
-      lines,
-      latency: null,
-      loss: null,
-    }].slice(-4320)
+    if (!Object.keys(lines).length)
+      return
+    const point: PingWindowPoint = { time: new Date(time).toISOString(), latency: null, loss: null, lines: { ...exact?.lines, ...lines } }
+    livePingHistoryByUuid.value[uuid] = (exact ? history.map(old => old === exact ? point : old) : [...history, point])
+      .sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
+      .slice(-16000)
     schedulePingCache()
+  }
+
+  function seedPingSamples(uuid: string, points: readonly PingWindowPoint[], preserveAll = true): void {
+    for (const point of points)
+      recordPingUpdates(uuid, Date.parse(point.time), point.lines ?? {}, preserveAll)
+  }
+
+  function recordPingSample(uuid: string, status: NodeStatus): void {
+    if (!status.online)
+      return
+    noteProbeHeartbeat(uuid, Date.parse(status.time))
+    if (status.pingSample === false)
+      return
+    recordPingUpdates(uuid, Date.parse(status.time), status.pingUpdates ?? {})
   }
 
   /**
@@ -422,8 +479,8 @@ const useNodesStore = defineStore('nodes', () => {
    * 初始化节点数据（首次加载）
    */
   function initNodes(clients: Record<string, Client>, statuses: Record<string, NodeStatus>): void {
-    hydratePingCache()
     const uuids = Object.keys(clients)
+    hydratePingCache(uuids)
     const existingUuids = new Set(nodes.value.map(n => n.uuid))
 
     // 更新现有节点或添加新节点
@@ -438,9 +495,16 @@ const useNodesStore = defineStore('nodes', () => {
       if (existingUuids.has(uuid) && index !== -1) {
         // 更新现有节点
         const baseNode = createNodeFromClient(client)
-        nodes.value[index] = status
-          ? updateNodeStatus(baseNode, extractStatusData(status))
-          : baseNode
+        const existing = nodes.value[index]!
+        const fresh = status && Date.parse(status.time) >= Date.parse(existing.time)
+        nodes.value[index] = updateNodeStatus(baseNode, fresh
+          ? extractStatusData(status)
+          : {
+              ...existing,
+              ram_total: existing.mem_total,
+              swap_total: existing.swap_total,
+              disk_total: existing.disk_total,
+            })
       }
       else {
         // 添加新节点
@@ -468,6 +532,7 @@ const useNodesStore = defineStore('nodes', () => {
         nodes.value.splice(i, 1)
         delete pingHistoryByUuid.value[node.uuid]
         delete livePingHistoryByUuid.value[node.uuid]
+        delete pingObservedThroughByUuid.value[node.uuid]
       }
     }
 
@@ -495,7 +560,7 @@ const useNodesStore = defineStore('nodes', () => {
         return
 
       const node = nodes.value[index]
-      if (!node)
+      if (!node || Date.parse(status.time) < Date.parse(node.time))
         return
 
       nodes.value[index] = updateNodeStatus(node, extractStatusData(status))
@@ -550,6 +615,7 @@ const useNodesStore = defineStore('nodes', () => {
           ping: currentNode.ping,
           pingSample: currentNode.pingSample,
           pingSampleKeys: currentNode.pingSampleKeys,
+          pingUpdates: currentNode.pingUpdates,
         })
       }
       else {
@@ -588,6 +654,7 @@ const useNodesStore = defineStore('nodes', () => {
     nodes.value = []
     pingHistoryByUuid.value = {}
     livePingHistoryByUuid.value = {}
+    pingObservedThroughByUuid.value = {}
     savePingCache()
     refreshEarthNodes(true)
   }
@@ -600,6 +667,7 @@ const useNodesStore = defineStore('nodes', () => {
     livePingHistoryByUuid,
     pingHistoryHours,
     pingHistoryStepMs,
+    pingObservedThroughByUuid,
     wsConnectionState,
     wsReconnectAttempts,
     // 计算属性
@@ -612,6 +680,9 @@ const useNodesStore = defineStore('nodes', () => {
     initNodes,
     updateNodeStatuses,
     recordPingSample,
+    recordPingUpdates,
+    seedPingSamples,
+    noteProbeHeartbeat,
     configurePingHistory,
     updateNodeClients,
     sortNodesByWeight,

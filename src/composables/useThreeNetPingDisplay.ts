@@ -1,26 +1,23 @@
 import type { MaybeRefOrGetter } from 'vue'
-import { computed, onScopeDispose, ref, toValue } from 'vue'
+import { computed, toValue } from 'vue'
+import { useProbeMinuteClock } from '@/composables/useProbeMinuteClock'
 import { useNodesStore } from '@/stores/nodes'
 import { getCachedSiteConfigs } from '@/utils/api'
-import { formatDateTime } from '@/utils/helper'
 import { bucketAverage, formatPingValue, pingColor, pingLineValue, projectPingLine, THREE_NET_KEYS, THREE_NET_NAMES } from '@/utils/threeNetPing'
 
 export function useThreeNetPingDisplay(uuid: MaybeRefOrGetter<string>) {
   const store = useNodesStore()
-  const now = ref(Date.now())
-  const timer = setInterval(() => {
-    now.value = Date.now()
-  }, 30_000)
-  onScopeDispose(() => clearInterval(timer))
+  const now = useProbeMinuteClock()
   const windowLabel = computed(() => store.showThreeNetDetails ? `近${store.pingHistoryHours}小时平均` : '实时')
   const node = computed(() => store.nodesByUuid.get(toValue(uuid)))
   const offlineSince = computed(() => node.value && !node.value.online ? Date.parse(node.value.time) : undefined)
+  const observedThrough = computed(() => Math.min(store.pingObservedThroughByUuid[toValue(uuid)] ?? 0, now.value))
   // The expensive projection depends on probe history, not 1-second CPU/resource updates.
   const bucketsByKey = computed(() => {
     const id = toValue(uuid)
     const history = store.pingHistoryByUuid[id] ?? []
     const live = store.livePingHistoryByUuid[id] ?? []
-    return THREE_NET_KEYS.map(key => projectPingLine(key, history, live, now.value, store.pingHistoryHours, store.pingHistoryStepMs, offlineSince.value))
+    return THREE_NET_KEYS.map(key => projectPingLine(key, history, live, now.value, store.pingHistoryHours, store.pingHistoryStepMs, offlineSince.value, observedThrough.value))
   })
   const lines = computed(() => {
     const currentNode = node.value
@@ -44,10 +41,12 @@ export function useThreeNetPingDisplay(uuid: MaybeRefOrGetter<string>) {
           key: bucket.start,
           end: bucket.end,
           latency: bucket.latency,
+          latencyPeak: bucket.latencyPeak,
+          peakColor: pingColor(bucket.latencyPeak, 'latency'),
+          showPeak: bucket.latencyPeak !== null && bucket.latency !== null && pingColor(bucket.latencyPeak, 'latency') !== pingColor(bucket.latency, 'latency'),
           loss: bucket.loss,
           latencyColor: pingColor(bucket.latency, 'latency'),
           lossColor: pingColor(bucket.loss, 'loss'),
-          tooltip: `${name} · ${formatDateTime(new Date(bucket.start).toISOString(), 'HH:mm')}–${formatDateTime(new Date(bucket.end).toISOString(), 'HH:mm')}\n延迟 ${formatPingValue(bucket.latency, 'latency')}\n丢包 ${formatPingValue(bucket.loss, 'loss')}`,
         })),
       }
     })

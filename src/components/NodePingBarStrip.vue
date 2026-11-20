@@ -9,6 +9,9 @@ interface DisplayBar {
   latency: number | null
   loss: number | null
   latencyColor: string
+  latencyPeak?: number | null
+  peakColor?: string
+  showPeak?: boolean
   lossColor: string
 }
 
@@ -40,7 +43,10 @@ const text = computed(() => {
   const summary = value === null
     ? props.metric === 'latency' && bar.loss === 100 ? '探测失败' : '暂无样本'
     : props.metric === 'latency' ? `${Number(value.toFixed(1))} ms` : formatPingValue(value, 'loss')
-  return `${props.name} · ${start} - ${end} · ${summary}`
+  const peak = props.metric === 'latency' && bar.latencyPeak !== null && bar.latencyPeak !== undefined
+    ? ` · 峰值 ${Number(bar.latencyPeak.toFixed(1))} ms`
+    : ''
+  return `${props.name} · ${start} - ${end} · ${props.metric === 'latency' ? '平均 ' : ''}${summary}${peak}`
 })
 
 function clearTimer() {
@@ -196,7 +202,9 @@ onBeforeUnmount(() => {
       class="ping-bar"
       :class="{ selected: activeIndex === index, empty: bar[metric] === null }"
       :style="{ backgroundColor: metric === 'latency' ? bar.latencyColor : bar.lossColor }"
-    />
+    >
+      <span v-if="metric === 'latency' && bar.showPeak" class="ping-peak" :style="{ backgroundColor: bar.peakColor }" />
+    </span>
   </div>
   <Teleport to="body">
     <span
@@ -230,6 +238,7 @@ onBeforeUnmount(() => {
   outline-offset: 2px;
 }
 .ping-bar {
+  position: relative;
   display: block;
   height: 100%;
   min-width: 0;
@@ -239,6 +248,14 @@ onBeforeUnmount(() => {
     transform 150ms ease-out,
     filter 150ms ease-out,
     opacity 150ms ease-out;
+}
+.ping-peak {
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  height: 2px;
+  border-radius: 1px 1px 0 0;
+  pointer-events: none;
 }
 .ping-bar.empty {
   opacity: 0.15;

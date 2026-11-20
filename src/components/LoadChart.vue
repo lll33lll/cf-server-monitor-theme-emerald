@@ -3,7 +3,7 @@ import type { RecordFormat } from '@/utils/recordHelper'
 import type { StatusRecord } from '@/utils/rpc'
 import { Icon } from '@iconify/vue'
 import dayjs from 'dayjs'
-import { computed, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, onMounted, onScopeDispose, ref, shallowRef, watch } from 'vue'
 import VChart from 'vue-echarts'
 import LongHistoryLoginDialog from '@/components/LongHistoryLoginDialog.vue'
 import { CardX } from '@/components/ui/card-x'
@@ -16,7 +16,6 @@ import { useAppStore } from '@/stores/app'
 import { useNodesStore } from '@/stores/nodes'
 import { DEFAULT_CHART_TIME_RANGE, getAvailableChartTimeRanges } from '@/utils/chartTimeRange'
 import { formatBytes, formatBytesSplit } from '@/utils/helper'
-import { fillMissingTimePoints } from '@/utils/recordHelper'
 import { getSharedRpc } from '@/utils/rpc'
 import '@/utils/echarts' // 共享 ECharts 配置
 
@@ -117,6 +116,10 @@ const remoteData = shallowRef<StatusRecord[]>([])
 const loading = ref(false)
 const isInitialLoad = ref(true) // 是否为首次加载（用于控制实时模式下的 NSpin 显示）
 const error = ref<string | null>(null)
+let fetchRequestId = 0
+onScopeDispose(() => {
+  fetchRequestId++
+})
 
 // 节点信息
 const nodeInfo = computed(() => nodesStore.nodesByUuid.get(props.uuid))
@@ -162,32 +165,6 @@ function trimToSelectedWindow(records: StatusRecord[]): StatusRecord[] {
   return records.filter(record => dayjs(record.time).valueOf() >= cutoff)
 }
 
-async function fetchRecentData() {
-  if (!props.uuid)
-    return
-
-  // 只在首次加载时显示 loading
-  if (isInitialLoad.value) {
-    loading.value = true
-  }
-  error.value = null
-
-  try {
-    const result = await rpc.getNodeRecentStatus(props.uuid)
-    const records = result?.records || []
-    records.sort((a, b) => dayjs(a.time).valueOf() - dayjs(b.time).valueOf())
-    remoteData.value = trimToSelectedWindow(records)
-  }
-  catch (err) {
-    error.value = err instanceof Error ? err.message : '获取数据失败'
-    remoteData.value = []
-  }
-  finally {
-    loading.value = false
-    isInitialLoad.value = false
-  }
-}
-
 function nodeToStatusRecord(node: NonNullable<typeof nodeInfo.value>): StatusRecord {
   return {
     client: node.uuid,
@@ -229,65 +206,60 @@ function appendRealtimeStatus(node: NonNullable<typeof nodeInfo.value>): void {
   remoteData.value = trimToSelectedWindow([...remoteData.value, next])
 }
 
-async function fetchHistoryData() {
-  if (!props.uuid)
+async function fetchData() {
+  const uuid = props.uuid
+  if (!uuid)
     return
-
-  const hours = selectedHours.value || 4
-
-  loading.value = true
+  const id = ++fetchRequestId
+  const hours = selectedHours.value
+  const realtime = isRealtime.value
+  if (isInitialLoad.value || !realtime)
+    loading.value = true
   error.value = null
-
   try {
-    const result = await rpc.getLoadRecords(props.uuid, hours)
-    const records = result.records || []
-
-    // 按时间排序
-    records.sort((a: StatusRecord, b: StatusRecord) =>
-      dayjs(a.time).valueOf() - dayjs(b.time).valueOf(),
-    )
-
-    remoteData.value = records
+    const result = realtime ? await rpc.getNodeRecentStatus(uuid) : await rpc.getLoadRecords(uuid, hours)
+    if (id !== fetchRequestId || uuid !== props.uuid)
+      return
+    const byTime = new Map<string, StatusRecord>()
+    for (const record of result.records ?? [])
+      byTime.set(record.time, record)
+    if (realtime) {
+      for (const live of remoteData.value) {
+        if (live.client !== uuid)
+          continue
+        const fetched = byTime.get(live.time)
+        byTime.set(live.time, fetched
+          ? {
+              ...live,
+              ...fetched,
+              net_total_up: fetched.net_total_up ?? live.net_total_up,
+              net_total_down: fetched.net_total_down ?? live.net_total_down,
+              net_monthly_up: fetched.net_monthly_up ?? live.net_monthly_up,
+              net_monthly_down: fetched.net_monthly_down ?? live.net_monthly_down,
+            }
+          : live)
+      }
+    }
+    remoteData.value = trimToSelectedWindow([...byTime.values()].sort((a, b) => Date.parse(a.time) - Date.parse(b.time)))
   }
   catch (err) {
-    error.value = err instanceof Error ? err.message : '获取数据失败'
-    remoteData.value = []
+    if (id === fetchRequestId) {
+      error.value = err instanceof Error ? err.message : '获取数据失败'
+      remoteData.value = []
+    }
   }
   finally {
-    loading.value = false
-  }
-}
-
-async function fetchData() {
-  if (isRealtime.value) {
-    await fetchRecentData()
-  }
-  else {
-    await fetchHistoryData()
+    if (id === fetchRequestId) {
+      loading.value = false
+      isInitialLoad.value = false
+    }
   }
 }
 
 // ==================== 数据处理 ====================
 
-const chartData = computed(() => {
-  const data = statusToRecordFormat(remoteData.value)
-  if (!data.length)
-    return []
-
-  if (isRealtime.value) {
-    return data
-  }
-
-  const hours = selectedHours.value
-  const minute = 60
-  const hour = minute * 60
-
-  // 7D 长档位用 1 小时网格，其余历史档位用 15 分钟网格
-  const intervalSec = hours > 120 ? hour : minute * 15
-  const maxGap = hours > 120 ? hour * 2 : minute * 30
-
-  return fillMissingTimePoints(data, intervalSec, hours * 3600, maxGap)
-})
+// Keep the real history rows; a synthetic 15-minute grid used to erase real samples and add gaps.
+const chartData = computed(() => statusToRecordFormat(remoteData.value))
 
 const latestStatus = computed(() => {
   const data = remoteData.value

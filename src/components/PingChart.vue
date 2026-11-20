@@ -25,7 +25,6 @@ const props = defineProps<{
 const appStore = useAppStore()
 const { pickSurfaceClass } = useBackgroundSurface()
 const nodesStore = useNodesStore()
-const nodeInfo = computed(() => nodesStore.nodesByUuid.get(props.uuid))
 const isDark = computed(() => appStore.isDark)
 // 使用共享的 RPC 实例，避免重复创建连接
 const rpc = getSharedRpc()
@@ -307,6 +306,7 @@ async function fetchRecords() {
 
     remoteData.value = records
     tasks.value = result.tasks
+    appendRealtimePing()
 
     if (tasks.value.length > 0 && selectedTaskIds.value.length === 0) {
       selectedTaskIds.value = tasks.value.map(t => t.id)
@@ -528,36 +528,43 @@ const PING_TASK_KEYS: Record<number, string> = {
   8: 'node_4',
 }
 
-function appendRealtimePing(node: NonNullable<typeof nodeInfo.value>): void {
-  if (selectedView.value !== DEFAULT_CHART_TIME_RANGE.label || !node.online || node.pingSample === false || !node.time || !node.ping)
+function appendRealtimePing(): void {
+  if (selectedView.value !== DEFAULT_CHART_TIME_RANGE.label)
     return
-
-  const time = node.time
-  const taskIds = tasks.value.map(task => task.id)
-  const records = taskIds.flatMap((taskId) => {
-    const key = tasks.value.find(task => task.id === taskId)?.key ?? PING_TASK_KEYS[taskId]
-    const ping = key ? node.ping?.[key] : undefined
-    if (!key || (node.pingSampleKeys && !node.pingSampleKeys.includes(key)) || !ping || (!Number.isFinite(ping.latest) && !Number.isFinite(ping.loss)))
-      return []
-
-    return [{
-      client: node.uuid,
-      task_id: taskId,
-      time,
-      value: ping.latest > 0 && !(ping.loss >= 100) ? ping.latest : -1,
-      loss: Number.isFinite(ping.loss) ? ping.loss : undefined,
-      metric: 'latency' as const,
-    }]
-  })
-
-  if (!records.length)
-    return
-
-  const recordKeys = new Set(records.map(record => `${record.task_id}:${record.time}`))
-  const existing = remoteData.value.filter(record => !recordKeys.has(`${record.task_id}:${record.time}`))
-  remoteData.value = [...existing, ...records]
-    .sort((a, b) => dayjs(a.time).valueOf() - dayjs(b.time).valueOf())
-    .slice(-500)
+  const cutoff = Date.now() - selectedHours.value * 3_600_000
+  const byTime = new Map<string, PingRecord>()
+  for (const record of remoteData.value) {
+    if (Date.parse(record.time) >= cutoff)
+      byTime.set(`${record.task_id}:${record.time}`, record)
+  }
+  for (const point of nodesStore.livePingHistoryByUuid[props.uuid] ?? []) {
+    if (Date.parse(point.time) < cutoff)
+      continue
+    for (const task of tasks.value) {
+      const key = task.key ?? PING_TASK_KEYS[task.id]
+      const line = key ? point.lines?.[key] : undefined
+      if (!line)
+        continue
+      const hasLatency = Object.hasOwn(line, 'latency')
+      const hasLoss = Object.hasOwn(line, 'loss')
+      if (!hasLatency && !hasLoss)
+        continue
+      const id = `${task.id}:${point.time}`
+      const old = byTime.get(id)
+      const delay = hasLatency ? line.latency ?? -1 : old?.value ?? -1
+      const loss = hasLoss ? line.loss ?? undefined : old?.loss
+      byTime.set(id, {
+        client: props.uuid,
+        task_id: task.id,
+        time: point.time,
+        value: loss === 100 ? -1 : delay,
+        loss,
+        metric: hasLatency || (old?.metric !== 'loss' && old !== undefined) ? 'latency' : 'loss',
+      })
+    }
+  }
+  // Retain the complete time window for every task, not the last 500 records shared by 8 tasks.
+  remoteData.value = [...byTime.values()].sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
 }
 
 const packetLossMarkers = computed(() => {
@@ -803,10 +810,7 @@ watch(() => props.uuid, () => {
   fetchRecords()
 })
 
-watch(nodeInfo, (node) => {
-  if (node)
-    appendRealtimePing(node)
-})
+watch(() => nodesStore.livePingHistoryByUuid[props.uuid], appendRealtimePing)
 
 onMounted(() => {
   fetchRecords()

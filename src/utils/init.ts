@@ -15,6 +15,7 @@ import {
   hasMultipleApiBases,
   isEnabledValue,
 } from '@/utils/api'
+import { probeUpdatesFromWire } from '@/utils/threeNetPing'
 import { requestTurnstileToken } from '@/utils/turnstile'
 
 interface WsMessage {
@@ -39,7 +40,9 @@ interface LiveSample {
 }
 
 function normalizeSampleTimestamp(value: unknown, fallback = Date.now()): number {
-  const number = Number(value)
+  let number = typeof value === 'number' || typeof value === 'string' ? Number(value) : Number.NaN
+  if (!Number.isFinite(number) && typeof value === 'string')
+    number = Date.parse(value)
   if (!Number.isFinite(number) || number <= 0)
     return fallback
   return number < 1e12 ? number * 1000 : number
@@ -66,6 +69,23 @@ class InitManager {
   private livePlaybackTimes = new Map<string, number>()
   private pendingStatuses = new Map<string, NodeStatus>()
   private destroyed = false
+  private snapshotTimer: ReturnType<typeof setInterval> | null = null
+  private snapshotPromise: Promise<void> | null = null
+  private onPageHide = () => this.nodesStore.savePingCache()
+  private onVisibility = () => {
+    if (document.hidden)
+      this.nodesStore.savePingCache()
+    else
+      this.refreshSnapshot()
+  }
+
+  private refreshSnapshot(): void {
+    if (this.destroyed || document.hidden || this.snapshotPromise)
+      return
+    this.snapshotPromise = this.loadNodes(true).catch(() => {}).finally(() => {
+      this.snapshotPromise = null
+    })
+  }
 
   async init(): Promise<void> {
     try {
@@ -106,6 +126,9 @@ class InitManager {
         this.advanceLiveSamples()
         this.flushPendingStatuses()
       }, LIVE_UPDATE_INTERVAL_MS)
+      this.snapshotTimer = setInterval(() => this.refreshSnapshot(), 300_000)
+      window.addEventListener('pagehide', this.onPageHide)
+      document.addEventListener('visibilitychange', this.onVisibility)
     }
     catch (error) {
       this.appStore.connectionError = true
@@ -116,14 +139,16 @@ class InitManager {
     }
   }
 
-  private async loadNodes(): Promise<void> {
+  private async loadNodes(quiet = false): Promise<void> {
     try {
       const { clients, statuses, latestReportUpdates, sysConfig } = await fetchAllServers()
+      if (this.destroyed)
+        return
       // 后端开关关闭时不消费历史窗口，卡片/列表显示三网实时值。
       const showThreeNetDetails = sysConfig?.show_three_net_details === undefined
         ? true
         : isEnabledValue(sysConfig.show_three_net_details)
-      this.nodesStore.configurePingHistory({ showThreeNetDetails })
+      this.nodesStore.configurePingHistory({ showThreeNetDetails, points: sysConfig?.latency_window?.points, hours: sysConfig?.latency_window?.hours })
       // 后端开关控制：show_price 关闭时访客不可见价格/价值信息（管理员不受影响）
       this.appStore.updateShowPrice(sysConfig?.show_price)
       this.nodesStore.initNodes(clients, statuses)
@@ -132,7 +157,7 @@ class InitManager {
         for (const update of updates) {
           const rawSamples: LiveSample[] = (update.samples ?? []).map(s => ({
             serverId: update.serverId,
-            ts: normalizeSampleTimestamp(s.ts, Date.now()),
+            ts: normalizeSampleTimestamp(s.ts ?? s.payload?.sample_timestamp ?? s.data?.sample_timestamp, 0),
             data: s.payload ?? s.data ?? {},
           }))
           if (!rawSamples.length)
@@ -142,11 +167,16 @@ class InitManager {
         }
       }
       this.flushPendingStatuses()
+      this.sockets.forEach((socket, apiIndex) => {
+        if (socket?.readyState === WebSocket.OPEN)
+          socket.send(JSON.stringify({ type: 'subscribe', scope: 'all', ids: getRegisteredServerIds(apiIndex) }))
+      })
 
       this.appStore.connectionError = false
     }
     catch (error) {
-      this.appStore.connectionError = true
+      if (!quiet || this.nodesStore.wsConnectionState !== 'connected')
+        this.appStore.connectionError = true
       throw error
     }
   }
@@ -165,9 +195,21 @@ class InitManager {
       id: sample.serverId,
       ...sample.data,
       last_updated: sample.ts,
+      sample_timestamp: sample.ts,
+      report_timestamp: sample.ts,
     }, apiIndex).status
 
     if (current) {
+      if (!sampleHasField(sample.data, 'cpu'))
+        status.cpu = current.cpu
+      if (!sampleHasField(sample.data, 'ram_used'))
+        status.ram = current.ram
+      if (!sampleHasField(sample.data, 'swap_used'))
+        status.swap = current.swap
+      if (!sampleHasField(sample.data, 'net_in_speed', 'net_in'))
+        status.net_in = current.net_in
+      if (!sampleHasField(sample.data, 'net_out_speed', 'net_out'))
+        status.net_out = current.net_out
       if (!sampleHasField(sample.data, 'net_tx', 'net_total_up'))
         status.net_total_up = current.net_total_up
       if (!sampleHasField(sample.data, 'net_rx', 'net_total_down'))
@@ -177,7 +219,7 @@ class InitManager {
       if (!sampleHasField(sample.data, 'net_rx_monthly'))
         status.net_monthly_down = current.net_monthly_down
       if (!sampleHasField(sample.data, 'boot_time'))
-        status.uptime = current.uptime + 1
+        status.uptime = current.uptime + Math.max(0, Math.floor((sample.ts - Date.parse(current.time)) / 1000))
       if (!sampleHasField(sample.data, 'ram_total'))
         status.ram_total = currentNode?.mem_total ?? status.ram_total
       if (!sampleHasField(sample.data, 'swap_total'))
@@ -202,12 +244,24 @@ class InitManager {
       if (!sampleHasField(sample.data, 'temp'))
         status.temp = current.temp
       const reported = new Set(status.pingSampleKeys ?? [])
-      status.ping = { ...current.ping, ...status.ping }
+      const merged = { ...current.ping }
       for (const key of reported) {
-        // An explicit null/false update clears that carrier, rather than keeping a stale value.
-        if (!sampleHasField(sample.data, `ping_${key}`, `loss_${key}`))
-          delete status.ping[key]
+        const update = status.pingUpdates?.[key] ?? {}
+        const old = current.ping?.[key]
+        const entry = status.ping?.[key]
+        const latest = Object.hasOwn(update, 'latency') ? update.latency ?? Number.NaN : old?.latest ?? Number.NaN
+        const loss = Object.hasOwn(update, 'loss') ? update.loss ?? Number.NaN : old?.loss ?? Number.NaN
+        merged[key] = {
+          name: entry?.name ?? old?.name ?? key,
+          latest,
+          avg: latest,
+          tail: latest,
+          loss,
+          min: latest,
+          max: latest,
+        }
       }
+      status.ping = merged
       if (!reported.size)
         status.pingSample = false
     }
@@ -226,18 +280,36 @@ class InitManager {
       return
     const statuses = Object.fromEntries(this.pendingStatuses)
     this.pendingStatuses.clear()
-    this.nodesStore.updateNodeStatuses(statuses)
+    this.nodesStore.updateNodeStatuses(statuses, false)
   }
 
   private enqueueLiveSamples(apiIndex: number, serverId: string, samples: LiveSample[]): void {
     const uuid = getDisplayUuid(apiIndex, serverId)
     const current = this.pendingStatuses.get(uuid) ?? this.nodesStore.nodesByUuid.get(uuid)
-    const currentTime = current?.time ? new Date(current.time).getTime() : 0
+    if (!current)
+      return
+    const valid = samples.filter(sample => Number.isFinite(sample.ts) && sample.ts > 0 && sample.ts <= Date.now() + 120_000)
+      .sort((a, b) => a.ts - b.ts)
+    // Capture every genuine delta immediately, independently of one-second visual playback.
+    this.nodesStore.seedPingSamples(uuid, valid.map(sample => ({
+      time: new Date(sample.ts).toISOString(),
+      latency: null,
+      loss: null,
+      lines: probeUpdatesFromWire(sample.data),
+    })), false)
+    for (const sample of valid)
+      this.nodesStore.noteProbeHeartbeat(uuid, sample.ts)
+    const currentTime = Date.parse(current.time) || 0
     const unique = new Map<number, LiveSample>()
-
-    for (const sample of samples) {
-      if (sample.ts > currentTime)
-        unique.set(sample.ts, sample)
+    for (const queued of this.liveSampleQueues.get(uuid) ?? []) {
+      if (queued.ts > currentTime)
+        unique.set(queued.ts, queued)
+    }
+    for (const sample of valid) {
+      if (sample.ts > currentTime) {
+        const old = unique.get(sample.ts)
+        unique.set(sample.ts, old ? { ...sample, data: { ...old.data, ...sample.data } } : sample)
+      }
     }
 
     const incoming = [...unique.values()].sort((a, b) => a.ts - b.ts)
@@ -246,13 +318,13 @@ class InitManager {
 
     if (incoming.length === 1) {
       this.liveSampleQueues.delete(uuid)
-      this.livePlaybackTimes.set(uuid, incoming[0]!.ts)
+      this.livePlaybackTimes.set(uuid, Math.max(this.livePlaybackTimes.get(uuid) ?? 0, incoming[0]!.ts))
       this.applyLiveSample(apiIndex, incoming[0]!)
       return
     }
 
     this.liveSampleQueues.set(uuid, incoming.slice(-600))
-    this.livePlaybackTimes.set(uuid, incoming[0]!.ts)
+    this.livePlaybackTimes.set(uuid, Math.max(this.livePlaybackTimes.get(uuid) ?? 0, incoming[0]!.ts))
     this.applyLiveSample(apiIndex, incoming[0]!)
     this.liveSampleQueues.get(uuid)?.shift()
   }
@@ -264,8 +336,10 @@ class InitManager {
       const playbackTime = (this.livePlaybackTimes.get(uuid) ?? Date.now()) + 1000
       let selected: LiveSample | undefined
 
-      while (queue.length && queue[0]!.ts <= playbackTime)
-        selected = queue.shift()
+      while (queue.length && queue[0]!.ts <= playbackTime) {
+        const next = queue.shift()!
+        selected = selected ? { ...next, data: { ...selected.data, ...next.data } } : next
+      }
 
       if (selected)
         this.applyLiveSample(apiIndex, selected)
@@ -287,6 +361,7 @@ class InitManager {
           serverId: update.serverId,
           ts: normalizeSampleTimestamp(
             sample.ts ?? sample.timestamp ?? data.sample_timestamp ?? data.last_updated ?? data.timestamp ?? message.ts,
+            0,
           ),
           data,
         }]
@@ -304,6 +379,7 @@ class InitManager {
     this.nodesStore.updateWsState('connecting', this.reconnectAttempts.get(apiIndex) ?? 0)
 
     socket.addEventListener('open', () => {
+      const reconnected = (this.reconnectAttempts.get(apiIndex) ?? 0) > 0
       this.reconnectAttempts.set(apiIndex, 0)
       socket.send(JSON.stringify({
         type: 'subscribe',
@@ -311,6 +387,8 @@ class InitManager {
         ids: getRegisteredServerIds(apiIndex),
       }))
       this.nodesStore.updateWsState('connected', 0)
+      if (reconnected)
+        this.refreshSnapshot()
     })
 
     socket.addEventListener('message', (event) => {
@@ -435,6 +513,11 @@ class InitManager {
 
   destroy(): void {
     this.destroyed = true
+    if (this.snapshotTimer)
+      clearInterval(this.snapshotTimer)
+    this.snapshotTimer = null
+    window.removeEventListener('pagehide', this.onPageHide)
+    document.removeEventListener('visibilitychange', this.onVisibility)
     this.sockets.forEach(socket => socket?.close())
     this.sockets = []
     this.reconnectTimers.forEach(timer => clearTimeout(timer))
