@@ -42,6 +42,7 @@ export function useThreeNetPingDisplay(uuid: MaybeRefOrGetter<string>) {
         lossColor: pingColor(loss, 'loss'),
         bars: buckets.map(bucket => ({
           key: bucket.start,
+          end: bucket.end,
           latency: bucket.latency,
           loss: bucket.loss,
           latencyColor: pingColor(bucket.latency, 'latency'),
