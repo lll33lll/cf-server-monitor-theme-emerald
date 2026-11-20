@@ -1,0 +1,89 @@
+name: Publish Three-Net Theme
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [custom]
+    paths:
+      - src/**
+      - package.json
+      - bun.lock
+      - vite.config.ts
+      - .github/patches/**
+      - .github/workflows/publish-custom.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: emerald-three-net-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: custom
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Apply source edits when bootstrapping
+        run: |
+          if [ -f .github/patches/three-net.edits.xz.base64 ]; then
+            python3 - <<'PY'
+          import base64, hashlib, json, lzma
+          from pathlib import Path
+          patch = Path('.github/patches/three-net.edits.xz.base64')
+          files = json.loads(lzma.decompress(base64.b64decode(patch.read_text())))
+          for item in files:
+              path = Path(item['path'])
+              assert '..' not in path.parts and (str(path).startswith('src/') or str(path) == 'package.json')
+              old = path.read_bytes() if path.exists() else b''
+              assert hashlib.sha256(old).hexdigest() == item['sha256'], str(path)
+              lines = old.decode().splitlines(keepends=True)
+              for start, count, text in sorted(item['edits'], key=lambda edit: edit[0], reverse=True):
+                  lines[start:start + count] = text.splitlines(keepends=True)
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text(''.join(lines))
+          patch.unlink()
+          PY
+          fi
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+      - name: Commit source changes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git restore .github/workflows
+          git add src README.md package.json bun.lock .gitignore .github
+          if ! git diff --cached --quiet; then
+            git commit -m "feat: separate three-net latency and loss [skip ci]"
+            git push origin HEAD:custom
+          fi
+      - run: bun run build
+      - name: Publish standalone theme assets
+        run: |
+          SOURCE=$(git rev-parse HEAD)
+          VERSION=$(node -p "require('./package.json').version")
+          cp LICENSE dist/LICENSE
+          printf '{"version":"%s","source":"%s","variant":"three-net"}\n' "$VERSION" "$SOURCE" > dist/version.json
+          cp -a dist /tmp/emerald-dist
+          git worktree add --detach /tmp/emerald-build
+          cd /tmp/emerald-build
+          git switch --orphan publish-build
+          git rm -rf --ignore-unmatch .
+          cp -a /tmp/emerald-dist/. .
+          git add -A
+          git commit -m "build: Emerald three-net v${VERSION} [skip ci]"
+          git push --force origin HEAD:build
+          echo "Fixed theme URL: https://github.com/${GITHUB_REPOSITORY}/tree/$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: emerald-three-net
+          path: dist/
