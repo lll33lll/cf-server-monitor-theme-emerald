@@ -15,7 +15,6 @@ export type PingLineUpdate = Partial<PingLineValue>
 export interface PingBucket extends PingLineValue {
   start: number
   end: number
-  latencyPeak: number | null
   latencyWeight: number
   lossWeight: number
 }
@@ -77,7 +76,6 @@ export function projectPingLine(
     end: start + size * (index + 1),
     latency: null,
     loss: null,
-    latencyPeak: null,
     latencyWeight: 0,
     lossWeight: 0,
   }))
@@ -136,7 +134,6 @@ export function projectPingLine(
       if (delay !== null) {
         bucket.latency = ((bucket.latency ?? 0) * bucket.latencyWeight + delay * weight) / (bucket.latencyWeight + weight)
         bucket.latencyWeight += weight
-        bucket.latencyPeak = Math.max(bucket.latencyPeak ?? delay, delay)
       }
       if (percent !== null) {
         bucket.loss = ((bucket.loss ?? 0) * bucket.lossWeight + percent * weight) / (bucket.lossWeight + weight)

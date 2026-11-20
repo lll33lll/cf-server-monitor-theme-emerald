@@ -10,9 +10,6 @@ interface DisplayBar {
   latency: number | null
   loss: number | null
   latencyColor: string
-  latencyPeak?: number | null
-  peakColor?: string
-  showPeak?: boolean
   lossColor: string
 }
 
@@ -45,10 +42,7 @@ const text = computed(() => {
   const summary = value === null
     ? props.metric === 'latency' && bar.loss === 100 ? '探测失败' : '暂无样本'
     : props.metric === 'latency' ? `${Number(value.toFixed(1))} ms` : formatPingValue(value, 'loss')
-  const peak = props.metric === 'latency' && bar.latencyPeak !== null && bar.latencyPeak !== undefined
-    ? ` · 峰值 ${Number(bar.latencyPeak.toFixed(1))} ms`
-    : ''
-  return `${props.name} · ${start} - ${end} · ${props.metric === 'latency' ? '平均 ' : ''}${summary}${peak}`
+  return `${props.name} · ${start} - ${end} · ${props.metric === 'latency' ? '平均 ' : ''}${summary}`
 })
 
 function clearTimer() {
@@ -246,10 +240,7 @@ onBeforeUnmount(() => {
       class="ping-bar"
       :class="{ selected: activeIndex === index, empty: bar[metric] === null }"
       :style="{ backgroundColor: metric === 'latency' ? bar.latencyColor : bar.lossColor }"
-    >
-      <span class="ping-mean" aria-hidden="true" />
-      <span v-if="metric === 'latency' && bar.showPeak" class="ping-peak" :style="{ backgroundColor: bar.peakColor }" aria-hidden="true" />
-    </span>
+    />
   </div>
   <Teleport to="body">
     <span
@@ -283,44 +274,20 @@ onBeforeUnmount(() => {
   outline-offset: 2px;
 }
 .ping-bar {
-  position: relative;
   display: block;
   height: 100%;
   min-width: 0;
   border-radius: 1px;
-  transition: opacity 150ms ease-out;
-}
-.ping-mean {
-  display: block;
-  width: 100%;
-  height: 100%;
-  border-radius: inherit;
-  background-color: inherit;
   transform-origin: center;
-  pointer-events: none;
   transition:
     transform 150ms ease-out,
-    filter 150ms ease-out;
-}
-.ping-peak {
-  position: absolute;
-  left: 50%;
-  top: -5px;
-  width: min(100%, 3px);
-  height: 2px;
-  border-radius: 2px;
-  transform: translateX(-50%);
-  pointer-events: none;
+    opacity 150ms ease-out;
 }
 .ping-bar.empty {
   opacity: 0.15;
 }
-.ping-bar.selected .ping-mean {
+.ping-bar.selected {
   transform: scaleY(1.6);
-  filter: saturate(1.14) brightness(1.04);
-}
-.ping-bar.selected .ping-peak {
-  filter: saturate(1.14) brightness(1.04);
 }
 .ping-bar.empty.selected {
   opacity: 0.55;
@@ -371,8 +338,7 @@ onBeforeUnmount(() => {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .ping-bar,
-  .ping-mean {
+  .ping-bar {
     transition: none;
   }
   .ping-bucket-bubble {

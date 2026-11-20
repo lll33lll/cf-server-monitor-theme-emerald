@@ -17,7 +17,7 @@ const metrics = computed(() => props.metric ? [props.metric] : ['latency', 'loss
 
 <template>
   <div
-    class="min-w-0 w-full" :class="metric ? '' : 'grid grid-cols-2 gap-x-3 gap-y-1.5'"
+    class="min-w-0 w-full" :class="metric ? '' : 'grid grid-cols-2 gap-3'"
     role="group" aria-label="三网延迟与丢包" @click.stop
   >
     <div v-for="kind in metrics" :key="kind" class="min-w-0">
@@ -33,14 +33,11 @@ const metrics = computed(() => props.metric ? [props.metric] : ['latency', 'loss
               {{ kind === 'latency' ? line.latencyDisplay : line.lossDisplay }}
             </span>
           </div>
-          <div v-if="showBars" class="mt-1.5">
+          <div v-if="showBars" class="mt-1">
             <NodePingBarStrip :bars="line.bars" :metric="kind" :name="line.name" :compact="compact" />
           </div>
         </div>
       </div>
-    </div>
-    <div v-if="showBars && (!metric || metric === 'latency')" class="col-span-full text-[9px] leading-tight text-muted-foreground" title="仅当峰值跨到更高色档时显示顶部点；同色档不重复标注。">
-      柱身：均值 · 顶部点：峰值
     </div>
   </div>
 </template>
