@@ -237,6 +237,7 @@ const useNodesStore = defineStore('nodes', () => {
   }
 
   function seedMeasuredPingSamples(uuid: string, points: readonly PingWindowPoint[]): void {
+    const beforeStatistics = combineLuminaMeasured(luminaReferenceByUuid.value[uuid] ?? [], luminaMeasuredByUuid.value[uuid] ?? [])
     const byTime = new Map(trimLumina(luminaMeasuredByUuid.value[uuid] ?? []).map(point => [Date.parse(point.time), point]))
     for (const point of trimLumina(points)) {
       const full = completeLuminaPoint(point)
@@ -246,7 +247,9 @@ const useNodesStore = defineStore('nodes', () => {
     const merged = thinLuminaPoints([...byTime.values()].sort((a, b) => Date.parse(a.time) - Date.parse(b.time)))
     if (JSON.stringify(merged) !== JSON.stringify(luminaMeasuredByUuid.value[uuid] ?? [])) {
       luminaMeasuredByUuid.value[uuid] = merged
-      luminaSeriesAtByUuid.value[uuid] = Date.now()
+      const afterStatistics = combineLuminaMeasured(luminaReferenceByUuid.value[uuid] ?? [], merged)
+      if (JSON.stringify(beforeStatistics) !== JSON.stringify(afterStatistics))
+        luminaSeriesAtByUuid.value[uuid] = Date.now()
       schedulePingCache()
     }
     const latest = merged.at(-1)
@@ -757,7 +760,20 @@ const useNodesStore = defineStore('nodes', () => {
   }
 
   function getLossDiagnosticInputs(uuid: string) {
+    const reference = luminaReferenceByUuid.value[uuid] ?? []
+    const own = luminaMeasuredByUuid.value[uuid] ?? []
+    const referenceUsable = reference.some(hasLuminaValues)
+    const lastReference = referenceUsable ? Math.max(...reference.map(point => Date.parse(point.time))) : null
     return {
+      selection: {
+        mode: referenceUsable ? 'reference-baseline-plus-new-tail' : 'own-measured',
+        referenceCount: reference.length,
+        ownCount: own.length,
+        referenceEndsAt: lastReference,
+        ownHistoricalExcludedFromStatistics: lastReference === null ? 0 : own.filter(point => Date.parse(point.time) <= lastReference).length,
+        ownNewTailCount: lastReference === null ? own.length : own.filter(point => Date.parse(point.time) > lastReference).length,
+        note: 'All own samples remain stored; exclusion only applies to the reference-baseline statistics.',
+      },
       window: pingHistoryByUuid.value[uuid] ?? [],
       ownMeasured: luminaMeasuredByUuid.value[uuid] ?? [],
       referenceMeasured: luminaReferenceByUuid.value[uuid] ?? [],

@@ -461,27 +461,15 @@ export function encodeLuminaPoint(point: PingWindowPoint): Array<number | null> 
   return [sample.time, ...CARRIER_KEYS.map(key => sample.ping[key]), ...CARRIER_KEYS.map(key => sample.ping[CARRIER_LOSS_KEYS[key]])]
 }
 
-/** Read-only reference history takes precedence where its measured samples are continuous. */
+/** Keep the reference baseline intact, including its gaps; do not mix a different old history into it. */
 export function combineLuminaMeasured(reference: readonly PingWindowPoint[], own: readonly PingWindowPoint[]): PingWindowPoint[] {
-  if (!reference.length)
+  const refs = reference.filter(point => Number.isFinite(Date.parse(point.time))).slice().sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
+  if (!refs.length || !refs.some(hasLuminaValues))
     return [...own]
-  if (!own.length)
-    return [...reference]
-  const refs = [...reference].sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
-  const cadence = Math.min(MIN_SAMPLE_GAP_MS, resolveCadenceMs(refs.map(toSample)))
-  const maxGap = Math.max(120_000, cadence * 2)
-  const refTimes = new Set(refs.map(point => Date.parse(point.time)))
-  const retained = own.filter((point) => {
-    const time = Date.parse(point.time)
-    if (refTimes.has(time))
-      return false
-    let low = 0
-    while (low < refs.length && Date.parse(refs[low]!.time) < time) low++
-    const before = refs[low - 1]
-    const after = refs[low]
-    return !before || !after || Date.parse(after.time) - Date.parse(before.time) > maxGap
-  })
-  return [...refs, ...retained].sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
+  const lastReference = Date.parse(refs.at(-1)!.time)
+  // Preserve all own samples in their cache/detail history, but only append genuinely newer samples to the baseline.
+  const newTail = own.filter(point => Date.parse(point.time) > lastReference)
+  return [...refs, ...newTail].sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
 }
 
 /** Exact LuminaPlus merge / weight / midpoint-bucket pipeline; only presentation is adapted. */
