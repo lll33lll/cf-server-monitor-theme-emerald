@@ -11,13 +11,12 @@ export function useThreeNetPingDisplay(uuid: MaybeRefOrGetter<string>) {
   const windowLabel = computed(() => store.showThreeNetDetails ? `近${store.pingHistoryHours}小时平均` : '实时')
   const node = computed(() => store.nodesByUuid.get(toValue(uuid)))
   const offlineSince = computed(() => node.value && !node.value.online ? Date.parse(node.value.time) : undefined)
-  const observedThrough = computed(() => Math.min(store.pingObservedThroughByUuid[toValue(uuid)] ?? 0, now.value))
   // The expensive projection depends on probe history, not 1-second CPU/resource updates.
   const bucketsByKey = computed(() => {
     const id = toValue(uuid)
     const history = store.pingHistoryByUuid[id] ?? []
-    const live = store.livePingHistoryByUuid[id] ?? []
-    return THREE_NET_KEYS.map(key => projectPingLine(key, history, live, now.value, store.pingHistoryHours, store.pingHistoryStepMs, offlineSince.value, observedThrough.value))
+    const live = store.luminaStatsHistoryByUuid[id] ?? []
+    return THREE_NET_KEYS.map(key => projectPingLine(key, history, live, now.value, store.pingHistoryHours, store.pingHistoryStepMs, offlineSince.value, store.luminaSeriesAtByUuid[id] ?? now.value))
   })
   const lines = computed(() => {
     const currentNode = node.value

@@ -73,10 +73,18 @@ class InitManager {
   private snapshotPromise: Promise<void> | null = null
   private onPageHide = () => this.nodesStore.savePingCache()
   private onVisibility = () => {
-    if (document.hidden)
+    if (document.hidden) {
       this.nodesStore.savePingCache()
-    else
+    }
+    else {
+      this.nodesStore.refreshLuminaReference()
       this.refreshSnapshot()
+    }
+  }
+
+  private onProbeStorage = (event: StorageEvent) => {
+    if (event.key === 'cfsm-luminaplus:ping-live:v1')
+      this.nodesStore.refreshLuminaReference()
   }
 
   private refreshSnapshot(): void {
@@ -128,6 +136,7 @@ class InitManager {
       }, LIVE_UPDATE_INTERVAL_MS)
       this.snapshotTimer = setInterval(() => this.refreshSnapshot(), 300_000)
       window.addEventListener('pagehide', this.onPageHide)
+      window.addEventListener('storage', this.onProbeStorage)
       document.addEventListener('visibilitychange', this.onVisibility)
     }
     catch (error) {
@@ -297,8 +306,10 @@ class InitManager {
       loss: null,
       lines: probeUpdatesFromWire(sample.data),
     })), false)
-    for (const sample of valid)
+    for (const sample of valid) {
+      this.nodesStore.recordLuminaFrame(uuid, sample.ts, probeUpdatesFromWire(sample.data))
       this.nodesStore.noteProbeHeartbeat(uuid, sample.ts)
+    }
     const currentTime = Date.parse(current.time) || 0
     const unique = new Map<number, LiveSample>()
     for (const queued of this.liveSampleQueues.get(uuid) ?? []) {
@@ -517,6 +528,7 @@ class InitManager {
       clearInterval(this.snapshotTimer)
     this.snapshotTimer = null
     window.removeEventListener('pagehide', this.onPageHide)
+    window.removeEventListener('storage', this.onProbeStorage)
     document.removeEventListener('visibilitychange', this.onVisibility)
     this.sockets.forEach(socket => socket?.close())
     this.sockets = []

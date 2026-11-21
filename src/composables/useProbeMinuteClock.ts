@@ -1,20 +1,38 @@
 import { onScopeDispose, ref } from 'vue'
 
-const clock = ref(Math.floor(Date.now() / 60_000) * 60_000)
+// Match LuminaPlus's shared clock: retain the actual initial instant, then refresh at minute+25ms.
+const clock = ref(Date.now())
+let minute = Math.floor(clock.value / 60_000)
 let users = 0
-let timer: ReturnType<typeof setInterval> | null = null
+let timer: ReturnType<typeof setTimeout> | null = null
 
-/** One shared minute boundary for every card/list: switching view cannot change bucket phase. */
+function refresh() {
+  const now = Date.now()
+  const bucket = Math.floor(now / 60_000)
+  if (bucket !== minute) {
+    minute = bucket
+    clock.value = now
+  }
+}
+
+function schedule() {
+  if (timer !== null || !users)
+    return
+  timer = setTimeout(() => {
+    timer = null
+    refresh()
+    schedule()
+  }, 60_000 - Date.now() % 60_000 + 25)
+}
+
 export function useProbeMinuteClock() {
-  clock.value = Math.floor(Date.now() / 60_000) * 60_000
+  refresh()
   users++
-  timer ??= setInterval(() => {
-    clock.value = Math.floor(Date.now() / 60_000) * 60_000
-  }, 1000)
+  schedule()
   onScopeDispose(() => {
     users--
     if (!users && timer !== null) {
-      clearInterval(timer)
+      clearTimeout(timer)
       timer = null
     }
   })

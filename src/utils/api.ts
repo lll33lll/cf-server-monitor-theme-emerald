@@ -1245,6 +1245,7 @@ async function fetchHistoryRows(uuid: string, hours: number): Promise<HistoryRow
         lines: probeUpdatesFromWire(row as Record<string, unknown>),
       }))
       useNodesStore().seedPingSamples(uuid, samples)
+      useNodesStore().seedMeasuredPingSamples(uuid, samples)
       return valid
     })
     .catch((error) => {

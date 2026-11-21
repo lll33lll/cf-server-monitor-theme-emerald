@@ -3,6 +3,7 @@ import type { PingLineUpdate } from '@/utils/threeNetPing'
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { parseNodeGroups } from '@/utils/groupHelper'
+import { combineLuminaMeasured, completeLuminaPoint, encodeLuminaPoint, hasLuminaValues, LUMINA_PAIR_CACHE_KEY, LUMINA_SAMPLE_TTL_MS, sameLuminaValues, thinLuminaPoints } from '@/utils/luminaProbe'
 import { decodeProbeNodes, encodeProbeSample, LEGACY_PROBE_CACHE_KEY, LUMINA_PROBE_CACHE_KEY, PROBE_CACHE_KEY } from '@/utils/probeCache'
 import { PROBE_KEYS, probeNumber } from '@/utils/threeNetPing'
 
@@ -138,6 +139,11 @@ const useNodesStore = defineStore('nodes', () => {
   const earthNodes = ref<NodeData[]>([])
   const pingHistoryByUuid = ref<Record<string, PingHistoryPoint[]>>({})
   const livePingHistoryByUuid = ref<Record<string, PingWindowPoint[]>>({})
+  const luminaMeasuredByUuid = ref<Record<string, PingWindowPoint[]>>({})
+  const luminaReferenceByUuid = ref<Record<string, PingWindowPoint[]>>({})
+  const luminaSeriesAtByUuid = ref<Record<string, number>>({})
+  const luminaStateByUuid = new Map<string, PingWindowPoint>()
+  const luminaStatsHistoryByUuid = computed(() => Object.fromEntries(nodes.value.map(node => [node.uuid, combineLuminaMeasured(luminaReferenceByUuid.value[node.uuid] ?? [], luminaMeasuredByUuid.value[node.uuid] ?? [])])))
   const cacheKey = PROBE_CACHE_KEY
   const pingObservedThroughByUuid = ref<Record<string, number>>({})
   let cacheHydrated = false
@@ -183,11 +189,87 @@ const useNodesStore = defineStore('nodes', () => {
     return points.filter(point => Date.parse(point.time) >= oldest && Date.parse(point.time) <= Date.now() + 120_000).slice(-16000)
   }
 
+  function trimLumina(points: readonly PingWindowPoint[]): PingWindowPoint[] {
+    const oldest = Date.now() - LUMINA_SAMPLE_TTL_MS
+    return points.filter(point => Date.parse(point.time) > 0 && Date.parse(point.time) >= oldest && Date.parse(point.time) <= Date.now() + 60_000)
+  }
+
+  function refreshLuminaReference(uuids = nodes.value.map(node => node.uuid)): void {
+    try {
+      const decoded = decodeProbeNodes(localStorage.getItem(LUMINA_PROBE_CACHE_KEY), 'lumina')
+      for (const id of uuids) {
+        const next = trimLumina(decoded[id]?.samples ?? [])
+        if (JSON.stringify(next) !== JSON.stringify(luminaReferenceByUuid.value[id] ?? [])) {
+          luminaReferenceByUuid.value[id] = next
+          luminaSeriesAtByUuid.value[id] = Date.now()
+        }
+        const latest = next.at(-1)
+        if (latest && (!luminaStateByUuid.has(id) || Date.parse(latest.time) > Date.parse(luminaStateByUuid.get(id)!.time)))
+          luminaStateByUuid.set(id, completeLuminaPoint(latest))
+      }
+    }
+    catch {}
+  }
+
+  /** Full paired snapshots use the exact reference sampler: changed 5s, unchanged 120s, 192 points. */
+  function recordLuminaFrame(uuid: string, time: number, updates: Record<string, PingLineUpdate>): void {
+    if (!Number.isFinite(time) || time <= 0 || time > Date.now() + 60_000 || Date.now() - time > LUMINA_SAMPLE_TTL_MS)
+      return
+    const previousState = luminaStateByUuid.get(uuid)
+    if (previousState && time < Date.parse(previousState.time))
+      return
+    const point = completeLuminaPoint({ time: new Date(time).toISOString(), latency: null, loss: null, lines: updates }, previousState)
+    luminaStateByUuid.set(uuid, point)
+    if (!hasLuminaValues(point))
+      return
+    const own = trimLumina(luminaMeasuredByUuid.value[uuid] ?? [])
+    const ownLast = own.at(-1)
+    const refLast = luminaReferenceByUuid.value[uuid]?.at(-1)
+    const last = refLast && (!ownLast || Date.parse(refLast.time) > Date.parse(ownLast.time)) ? refLast : ownLast
+    if (last) {
+      const gap = time - Date.parse(last.time)
+      if (gap <= 0 || gap < (sameLuminaValues(last, point) ? 120_000 : 5000))
+        return
+    }
+    luminaMeasuredByUuid.value[uuid] = thinLuminaPoints([...own, point])
+    luminaSeriesAtByUuid.value[uuid] = Date.now()
+    schedulePingCache()
+  }
+
+  function seedMeasuredPingSamples(uuid: string, points: readonly PingWindowPoint[]): void {
+    const byTime = new Map(trimLumina(luminaMeasuredByUuid.value[uuid] ?? []).map(point => [Date.parse(point.time), point]))
+    for (const point of trimLumina(points)) {
+      const full = completeLuminaPoint(point)
+      if (hasLuminaValues(full))
+        byTime.set(Date.parse(full.time), full)
+    }
+    const merged = thinLuminaPoints([...byTime.values()].sort((a, b) => Date.parse(a.time) - Date.parse(b.time)))
+    if (JSON.stringify(merged) !== JSON.stringify(luminaMeasuredByUuid.value[uuid] ?? [])) {
+      luminaMeasuredByUuid.value[uuid] = merged
+      luminaSeriesAtByUuid.value[uuid] = Date.now()
+      schedulePingCache()
+    }
+    const latest = merged.at(-1)
+    if (latest && (!luminaStateByUuid.has(uuid) || Date.parse(latest.time) > Date.parse(luminaStateByUuid.get(uuid)!.time)))
+      luminaStateByUuid.set(uuid, latest)
+  }
+
   function hydratePingCache(uuids: string[]): void {
     if (cacheHydrated)
       return
     cacheHydrated = true
+    refreshLuminaReference(uuids)
     try {
+      const paired = decodeProbeNodes(localStorage.getItem(LUMINA_PAIR_CACHE_KEY), 'lumina')
+      for (const id of uuids) {
+        const points = trimLumina(paired[id]?.samples ?? [])
+        if (points.length)
+          luminaMeasuredByUuid.value[id] = thinLuminaPoints(points)
+        const latest = points.at(-1)
+        if (latest && (!luminaStateByUuid.has(id) || Date.parse(latest.time) > Date.parse(luminaStateByUuid.get(id)!.time)))
+          luminaStateByUuid.set(id, completeLuminaPoint(latest))
+        luminaSeriesAtByUuid.value[id] = Date.now()
+      }
       // Only read LuminaPlus's real cache; never write to or remove another theme's storage.
       const sources = [
         decodeProbeNodes(localStorage.getItem(LUMINA_PROBE_CACHE_KEY), 'lumina'),
@@ -220,6 +302,9 @@ const useNodesStore = defineStore('nodes', () => {
           observedThrough: pingObservedThroughByUuid.value[uuid] ?? 0,
         }]))
       localStorage.setItem(cacheKey, JSON.stringify({ v: 2, nodes: saved }))
+      const paired = Object.fromEntries(Object.entries(luminaMeasuredByUuid.value).filter(([id]) => active.has(id)).slice(0, 128)
+        .map(([id, points]) => [id, trimLumina(points).map(encodeLuminaPoint)]))
+      localStorage.setItem(LUMINA_PAIR_CACHE_KEY, JSON.stringify({ v: 1, savedAt: Date.now(), nodes: paired }))
     }
     catch {}
   }
@@ -457,6 +542,7 @@ const useNodesStore = defineStore('nodes', () => {
   function recordPingSample(uuid: string, status: NodeStatus): void {
     if (!status.online)
       return
+    recordLuminaFrame(uuid, Date.parse(status.time), status.pingUpdates ?? {})
     noteProbeHeartbeat(uuid, Date.parse(status.time))
     if (status.pingSample === false)
       return
@@ -516,10 +602,13 @@ const useNodesStore = defineStore('nodes', () => {
       }
 
       if (status) {
-        if (pingHistoryConfig.value.showThreeNetDetails && status.pingWindow?.length)
-          pingHistoryByUuid.value[uuid] = trimPingHistory(status.pingWindow)
-        else
-          pingHistoryByUuid.value[uuid] = trimPingHistory(pingHistoryByUuid.value[uuid] ?? [])
+        const nextWindow = pingHistoryConfig.value.showThreeNetDetails && status.pingWindow?.length
+          ? trimPingHistory(status.pingWindow)
+          : trimPingHistory(pingHistoryByUuid.value[uuid] ?? [])
+        if (JSON.stringify(nextWindow) !== JSON.stringify(pingHistoryByUuid.value[uuid] ?? [])) {
+          pingHistoryByUuid.value[uuid] = nextWindow
+          luminaSeriesAtByUuid.value[uuid] = Date.now()
+        }
         recordPingSample(uuid, status)
       }
     })
@@ -533,6 +622,10 @@ const useNodesStore = defineStore('nodes', () => {
         delete pingHistoryByUuid.value[node.uuid]
         delete livePingHistoryByUuid.value[node.uuid]
         delete pingObservedThroughByUuid.value[node.uuid]
+        delete luminaMeasuredByUuid.value[node.uuid]
+        delete luminaReferenceByUuid.value[node.uuid]
+        delete luminaSeriesAtByUuid.value[node.uuid]
+        luminaStateByUuid.delete(node.uuid)
       }
     }
 
@@ -655,6 +748,10 @@ const useNodesStore = defineStore('nodes', () => {
     pingHistoryByUuid.value = {}
     livePingHistoryByUuid.value = {}
     pingObservedThroughByUuid.value = {}
+    luminaMeasuredByUuid.value = {}
+    luminaReferenceByUuid.value = {}
+    luminaSeriesAtByUuid.value = {}
+    luminaStateByUuid.clear()
     savePingCache()
     refreshEarthNodes(true)
   }
@@ -668,6 +765,8 @@ const useNodesStore = defineStore('nodes', () => {
     pingHistoryHours,
     pingHistoryStepMs,
     pingObservedThroughByUuid,
+    luminaStatsHistoryByUuid,
+    luminaSeriesAtByUuid,
     wsConnectionState,
     wsReconnectAttempts,
     // 计算属性
@@ -682,6 +781,9 @@ const useNodesStore = defineStore('nodes', () => {
     recordPingSample,
     recordPingUpdates,
     seedPingSamples,
+    seedMeasuredPingSamples,
+    recordLuminaFrame,
+    refreshLuminaReference,
     noteProbeHeartbeat,
     configurePingHistory,
     updateNodeClients,
