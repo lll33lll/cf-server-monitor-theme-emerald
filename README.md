@@ -1,6 +1,6 @@
 # Emerald 三网定制主题
 
-基于 [Tokinx/Emerald](https://github.com/Tokinx/cf-server-monitor-theme-emerald) 的 CF Server Monitor 自用三网主题。当前版本 **v1.2.19**。
+基于 [Tokinx/Emerald](https://github.com/Tokinx/cf-server-monitor-theme-emerald) 的 CF Server Monitor 自用三网主题。当前版本 **v1.2.20**。
 
 只修改主题，不修改后端、探针或服务器，不自动切换线上设置。每根柱子只按平均值显示单一颜色，不加峰值红点、色帽或混色。
 
@@ -9,10 +9,14 @@
 后台 → 主题商店 → 自定义主题 URL：
 
 ```text
-https://github.com/lll33lll/cf-server-monitor-theme-emerald/tree/faf797718b1a250c69e76b06c86c6a29af79f475
+https://github.com/lll33lll/cf-server-monitor-theme-emerald/tree/47842119ec4758804890fb93610fcb14b8200e9f
 ```
 
 也可刷新后台，在 **Emerald · 自用三网版** 加载并选择新版。源码在 `custom`，产物在 `build`。旧固定 SHA 不会自动更新。
+
+## v1.2.20：恢复完整标题
+
+顶部站名恢复原来的自动换行、完整显示，不再强制单行省略。下载按钮仍已移除，延迟 / 丢包统计、历史来源、缓存和柱子交互不变。
 
 ## v1.2.19：移除诊断下载按钮
 
