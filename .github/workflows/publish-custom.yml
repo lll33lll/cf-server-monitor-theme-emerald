@@ -40,7 +40,16 @@ jobs:
           import base64, hashlib, json, lzma
           from pathlib import Path
           patch = Path('.github/patches/three-net.edits.xz.base64')
-          files = json.loads(lzma.decompress(base64.b64decode(patch.read_text())))
+          encoded = patch.read_text().strip()
+          correction = Path('.github/patches/three-net.repair.json')
+          if correction.exists():
+              repair = json.loads(correction.read_text())
+              assert hashlib.sha256(encoded.encode()).hexdigest() == repair['bad_sha256']
+              for index, char in sorted(repair['insertions'], reverse=True):
+                  encoded = encoded[:index] + char + encoded[index:]
+              assert hashlib.sha256(encoded.encode()).hexdigest() == repair['good_sha256']
+              correction.unlink()
+          files = json.loads(lzma.decompress(base64.b64decode(encoded)))
           for item in files:
               path = Path(item['path'])
               assert '..' not in path.parts and (str(path).startswith('src/') or str(path) == 'package.json')
