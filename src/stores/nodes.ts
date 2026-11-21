@@ -756,6 +756,18 @@ const useNodesStore = defineStore('nodes', () => {
     refreshEarthNodes(true)
   }
 
+  function getLossDiagnosticInputs(uuid: string) {
+    return {
+      window: pingHistoryByUuid.value[uuid] ?? [],
+      ownMeasured: luminaMeasuredByUuid.value[uuid] ?? [],
+      referenceMeasured: luminaReferenceByUuid.value[uuid] ?? [],
+      mergedMeasured: luminaStatsHistoryByUuid.value[uuid] ?? [],
+      weightedAt: luminaSeriesAtByUuid.value[uuid] ?? 0,
+      rawProbePointCount: livePingHistoryByUuid.value[uuid]?.length ?? 0,
+      observedThrough: pingObservedThroughByUuid.value[uuid] ?? 0,
+    }
+  }
+
   return {
     // 状态
     nodes,
@@ -784,6 +796,7 @@ const useNodesStore = defineStore('nodes', () => {
     seedMeasuredPingSamples,
     recordLuminaFrame,
     refreshLuminaReference,
+    getLossDiagnosticInputs,
     noteProbeHeartbeat,
     configurePingHistory,
     updateNodeClients,

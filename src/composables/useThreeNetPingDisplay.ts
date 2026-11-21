@@ -47,5 +47,5 @@ export function useThreeNetPingDisplay(uuid: MaybeRefOrGetter<string>) {
       }
     })
   })
-  return { lines, windowLabel, showBars: computed(() => store.showThreeNetDetails) }
+  return { lines, windowLabel, plotNow: now, weightedAt: computed(() => store.luminaSeriesAtByUuid[toValue(uuid)] ?? now.value), showBars: computed(() => store.showThreeNetDetails) }
 }
