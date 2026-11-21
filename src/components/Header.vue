@@ -7,7 +7,6 @@ import { Button } from '@/components/ui/button'
 import { DataTooltip } from '@/components/ui/data-tooltip'
 import { useAppStore } from '@/stores/app'
 import { buildAdminUrl, getApiAssetUrl } from '@/utils/api'
-import { exportLossDiagnostics } from '@/utils/lossDiagnostics'
 
 const router = useRouter()
 const appStore = useAppStore()
@@ -32,15 +31,11 @@ const actionButtons = computed(() => {
       action: 'jumpToSetting',
     })
   }
-  buttons.push({ title: '导出丢包诊断', icon: 'icon-park-outline:download', action: 'lossDiagnostics' })
   return buttons
 })
 
 function handleButtonClick(action: string) {
   switch (action) {
-    case 'lossDiagnostics':
-      exportLossDiagnostics()
-      break
     case 'toggleTheme':
       appStore.updateThemeMode()
       break
